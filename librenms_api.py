@@ -1,9 +1,10 @@
+# librenms_api.py
 import requests
 
 class LibreNMSAPI:
     def __init__(self, base_url, api_key):
         """
-        base_url: URL Twojego serwera LibreNMS, np. "http://lnms.debacom.pl"
+        base_url: URL Twojego serwera LibreNMS"
         api_key: Klucz API do autoryzacji
         """
         self.base_url = base_url.rstrip('/')
@@ -21,7 +22,6 @@ class LibreNMSAPI:
         return data.get("devices", [])
 
     def get_ports(self, device_id):
-        # Używamy dedykowanego endpointu dla urządzenia, który zwraca porty z tabeli ports
         data = self._get(f"devices/{device_id}/ports")
         if isinstance(data, dict):
             return data.get("ports", [])
@@ -30,11 +30,7 @@ class LibreNMSAPI:
             return []
 
     def get_port_description(self, port_id):
-        """
-        Pobiera opis portu (ifAlias) dla danego port_id.
-        Endpoint: /api/v0/ports/:portid/description
-        Przykładowa odpowiedź: {"status": "ok", "port_description": "GigabitEthernet14"}
-        """
+        # Jeśli chcielibyśmy wywołać dodatkowy endpoint, ale w tej wersji opieramy się na danych z get_ports
         data = self._get(f"ports/{port_id}/description")
         if isinstance(data, dict):
             return data.get("port_description", "")

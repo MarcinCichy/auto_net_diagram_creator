@@ -1,3 +1,4 @@
+# drawio_generator.py
 import xml.etree.ElementTree as ET
 
 class DrawioXMLGenerator:
@@ -58,7 +59,7 @@ class DrawioXMLGenerator:
     def add_port(self, label, x, y, used=False):
         unique_id = f"port_{self.port_counter}"
         self.port_counter += 1
-        fill_color = "#b7e1cd" if used else "#e2e2e2"  # zielony jeśli port używany
+        fill_color = "#b7e1cd" if used else "#e2e2e2"
         cell = ET.SubElement(
             self.root_cell,
             "mxCell",
