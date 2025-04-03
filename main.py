@@ -1,3 +1,5 @@
+#main.py
+
 import os
 import json
 from config import get_config
