@@ -20,7 +20,6 @@ class DrawioXMLGenerator:
         })
         self.root_cell = ET.SubElement(self.root, "root")
         self._create_default_cells()
-
         self.device_counter = 1
         self.port_counter = 1
         self.edge_counter = 1
