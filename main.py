@@ -1,9 +1,7 @@
-#main.py
-
 import os
 import json
 from config import get_config
-from diagram_builder import build_diagram_for_device_id
+from diagram_builder import build_diagram_for_device_info
 from librenms_api import LibreNMSAPI
 
 
@@ -56,10 +54,8 @@ def main():
 
         print("Wybrane urządzenie:")
         print(json.dumps(target_device, indent=2, ensure_ascii=False))
-        device_id = target_device.get("device_id")
-
-        # Wywołaj funkcję budującą diagram dla znalezionego device_id
-        diagram_xml = build_diagram_for_device_id(api, str(device_id))
+        # Przekazujemy cały słownik urządzenia (device_info) do funkcji generującej diagram
+        diagram_xml = build_diagram_for_device_info(api, target_device)
         if diagram_xml:
             output_file = f"network_diagram_{target_ip.replace('.', '_')}.drawio"
             with open(output_file, "w", encoding="utf-8") as f:
