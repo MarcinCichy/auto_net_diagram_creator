@@ -1,3 +1,4 @@
+# src/main.py
 import sys
 import config
 from librenms_client import LibreNMSClient
