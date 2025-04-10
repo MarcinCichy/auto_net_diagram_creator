@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 import re
 import copy
-from . import config # Relative import
+import config # Relative import
 
 def modify_style(style_str, new_styles):
     """Parses a draw.io style string, updates it, and returns the new string."""
@@ -58,8 +58,15 @@ class DrawioTemplate:
             if self.template_root is None:
                 raise ValueError("Could not find <root> element in the template file.")
 
-            # Find the group element - assuming there's only one main group
-            self.group_element = self.template_root.find("./mxCell[contains(@style,'group;')]")
+            # Find the group element by iterating and checking the style attribute in Python
+            self.group_element = None  # Initialize as None
+            # Find potential candidates: direct mxCell children of the template root
+            for cell in self.template_root.findall("./mxCell"):
+                style = cell.get('style', '')  # Get style attribute, default to empty string
+                if 'group;' in style:  # Check if 'group;' substring exists in the style
+                    self.group_element = cell
+                    print(f"INFO: Found group element using style check: id='{cell.get('id')}'")
+                    break  # Assume the first one found is the correct group
             if self.group_element is None:
                  # Fallback: find the first element with children? Might be less reliable.
                  # Or assume all top-level elements (parent='1') form the template.

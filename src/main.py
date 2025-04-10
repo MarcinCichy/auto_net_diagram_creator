@@ -1,8 +1,8 @@
 import sys
-from . import config
-from .librenms_client import LibreNMSClient
-from .drawio_utils import DrawioTemplate
-from .diagram_builder import DiagramBuilder
+import config
+from librenms_client import LibreNMSClient
+from drawio_utils import DrawioTemplate
+from diagram_builder import DiagramBuilder
 
 def read_ip_list(filepath):
     """Reads IP addresses from the specified file."""
