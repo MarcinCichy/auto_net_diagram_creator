@@ -35,6 +35,7 @@ def get_output_diagram_file():
     return os.path.join(project_root, get_env_variable("OUTPUT_DIAGRAM_FILE", "network_diagram.drawio"))
 
 def get_port_identifier_field():
+    # return get_env_variable("PORT_IDENTIFIER_FIELD", "ifName")
     return get_env_variable("PORT_IDENTIFIER_FIELD", "ifName")
 
 def get_port_number_regex():
@@ -57,9 +58,11 @@ SWITCH_SPACING_Y = get_int_setting("SWITCH_SPACING_Y", 200)
 SWITCHES_PER_ROW = get_int_setting("SWITCHES_PER_ROW", 4)
 START_X = get_int_setting("START_X", 50)
 START_Y = get_int_setting("START_Y", 50)
-PORT_UP_COLOR = get_env_variable("PORT_UP_COLOR", "#00FF00")
-PORT_DOWN_COLOR = get_env_variable("PORT_DOWN_COLOR", "#FF0000")
-PORT_DEFAULT_COLOR = get_env_variable("PORT_DEFAULT_COLOR", "#D3D3D3")
+PORT_IDENTIFIER_FIELD = os.getenv("PORT_IDENTIFIER_FIELD", "ifName")
+PORT_NUMBER_REGEX = os.getenv("PORT_NUMBER_REGEX", r"Ethernet1/(\d+)")
+PORT_UP_COLOR = "#00FF00"
+PORT_DOWN_COLOR = "#FF0000"
+PORT_DEFAULT_COLOR = "#CCCCCC"
 ADD_DEVICE_LABEL = get_bool_setting("ADD_DEVICE_LABEL", True)
 
 # Simple check for essential config

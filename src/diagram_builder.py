@@ -3,6 +3,7 @@ import copy
 import math
 import uuid
 import config, drawio_utils
+import json
 
 class DiagramBuilder:
     """Builds the draw.io diagram XML structure."""
@@ -48,7 +49,10 @@ class DiagramBuilder:
             return mapped_ports
 
         for port in device_ports_data:
+            print("DEBUG FULL PORT DATA:\n", json.dumps(port, indent=2))
             port_id_value = port.get(identifier_field)
+            print(f"DEBUG: Port {port_id_value} — ifOperStatus={port.get('ifOperStatus')}")
+
             template_port_num = None
 
             if identifier_field == 'ifName' and regex_pattern:
@@ -59,11 +63,8 @@ class DiagramBuilder:
             if template_port_num:
                 status = 'down'
                 oper_status = port.get('ifOperStatus', 'down').lower()
-                admin_status = port.get('ifAdminStatus', 'up').lower()
 
-                if admin_status == 'down':
-                    status = 'down'
-                elif oper_status in ['up', 'testing']:
+                if oper_status in ['up', 'testing']:
                     status = 'up'
 
                 mapped_ports[str(template_port_num)] = {'status': status, 'raw_data': port}
@@ -80,6 +81,7 @@ class DiagramBuilder:
         print(f"INFO: Position calculated: X={pos_x}, Y={pos_y} (Switch {self.switch_count + 1})")
 
         mapped_ports = self._map_ports_to_template(device_ports_data)
+        print(f"DEBUG: Mapped ports for {device_name}: {list(mapped_ports.keys())}")
         if not mapped_ports:
             print(f"WARN: No ports could be mapped for device {device_name} based on config.")
 
@@ -135,8 +137,7 @@ class DiagramBuilder:
                     del geometry.attrib['relative']
 
             port_number_value = new_child.get('value')
-            is_port_element = (port_number_value and port_number_value.isdigit() and
-                               self.template.get_port_element_template(port_number_value) is not None)
+            is_port_element = (port_number_value and port_number_value.isdigit() and self.template.get_port_element_template(port_number_value) is not None)
 
             if is_port_element:
                 port_info = mapped_ports.get(port_number_value)
@@ -155,6 +156,36 @@ class DiagramBuilder:
                 style = new_child.get('style', '')
                 new_style = drawio_utils.modify_style(style, {'fillColor': fill_color})
                 new_child.set('style', new_style)
+
+                # Draw line and label
+                port_data = mapped_ports.get(port_number_value)
+                if port_data:
+                    alias = port_data['raw_data'].get('ifAlias', '')
+                    port_geometry = new_child.find("./mxGeometry")
+                    if port_geometry is not None:
+                        x = float(port_geometry.get('x', 0)) + pos_x
+                        y = float(port_geometry.get('y', 0)) + pos_y
+                        direction = -30 if int(port_number_value) % 2 == 1 else 30
+
+                        line_id = self._get_unique_id()
+                        line_cell = ET.Element("mxCell", id=line_id, parent="1", style="endArrow=none;strokeColor=#000000;", edge="1")
+                        ET.SubElement(line_cell, "mxGeometry", attrib={
+                            'relative': '1',
+                            'as': 'geometry',
+                            'points': f"{x},{y};{x},{y + direction}"
+                        })
+                        elements_to_add.append(line_cell)
+
+                        label_id = self._get_unique_id()
+                        label_cell = ET.Element("mxCell", id=label_id, value=alias, style="text;html=1;strokeColor=none;fillColor=none;align=center;", vertex="1", parent="1")
+                        ET.SubElement(label_cell, "mxGeometry", attrib={
+                            'x': str(x - 50),
+                            'y': str(y + direction - 10),
+                            'width': '100',
+                            'height': '20',
+                            'as': 'geometry'
+                        })
+                        elements_to_add.append(label_cell)
 
             elements_to_add.append(new_child)
 
@@ -213,7 +244,7 @@ class DiagramBuilder:
 
         try:
             xml_string = ET.tostring(self.mxfile, encoding='utf-8', method='xml')
-            xml_declaration = b'<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n'
+            xml_declaration = b'<?xml version="1.0" encoding="UTF-8"?>\n'
 
             with open(filepath, 'wb') as f:
                 f.write(xml_declaration)
