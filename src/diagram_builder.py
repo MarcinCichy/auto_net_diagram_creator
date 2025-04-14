@@ -29,7 +29,7 @@ class DiagramBuilder:
     def _create_diagram_base(self):
         mxfile = ET.Element("mxfile", host="PythonScript", modified="...", agent="...", etag=str(uuid.uuid4()), version="1.0", type="device")
         diagram = ET.SubElement(mxfile, "diagram", id="diagram-1", name="Network Map")
-        page_width = str(config.START_X * 2 + self.template_width * config.SWITCHES_PER_ROW + config.SWITCH_SPACING_X * (config.SWITCHES_PER_ROW -1)) if config.SWITCHES_PER_ROW > 0 else "827"
+        page_width = str(config.START_X * 2 + self.template_width * config.SWITCHES_PER_ROW + config.SWITCH_SPACING_X * (config.SWITCHES_PER_ROW - 1)) if config.SWITCHES_PER_ROW > 0 else "827"
         page_height = str(config.START_Y * 2 + self.template_height)
         mxGraphModel = ET.SubElement(diagram, "mxGraphModel", dx="1500", dy="1000", grid="1", gridSize="10", guides="1", tooltips="1", connect="1", arrows="1", fold="1", page="1", pageScale="1", pageWidth=page_width, pageHeight=page_height, math="0", shadow="0")
         root = ET.SubElement(mxGraphModel, "root")
@@ -41,34 +41,56 @@ class DiagramBuilder:
         return str(uuid.uuid4())
 
     def _map_ports_to_template(self, device_ports_data):
+        """
+        Maps port data from the API to the template port elements.
+        Korzysta z pola z konfiguracji (np. ifName), ale jeśli pusta, próbuje użyć 'ifIndex'.
+        Następnie stosuje regex z konfiguracji, aby wyłuskać numer portu.
+        Dla statusu portu wykorzystuje pole: ifOperStatus.
+        """
         mapped_ports = {}
+        # Pobierz ustawione pole – może to być ifName, ale jeśli nie ma zawartości, spróbujemy ifIndex.
         identifier_field = config.get_port_identifier_field()
-        regex_pattern = config.get_port_number_regex() if identifier_field == 'ifName' else None
+        alias_field = "ifAlias"
+        oper_status_field = "ifOperStatus"  # rozszerzone API zwraca dane w tym polu
+
+        regex_pattern = config.get_port_number_regex() if identifier_field in ['ifName', 'ifAlias'] else None
 
         if not device_ports_data:
             return mapped_ports
 
         for port in device_ports_data:
-            print("DEBUG FULL PORT DATA:\n", json.dumps(port, indent=2))
-            port_id_value = port.get(identifier_field)
-            print(f"DEBUG: Port {port_id_value} — ifOperStatus={port.get('ifOperStatus')}")
-
+            # Dla logowania: wypisz kluczowe pola odczytane z API
+            print("DEBUG: Odczytano port z API:")
+            print("  ifName:     ", port.get("ifName"))
+            print("  ifIndex:    ", port.get("ifIndex"))
+            print("  ifOperStatus:", port.get("ifOperStatus"))
+            print("  ifAlias:    ", port.get("ifAlias"))
+            # Próba użycia identifier_field, a jeśli pusta, użyjemy ifIndex
+            value = port.get(identifier_field)
+            if not value or str(value).strip() == "":
+                value = port.get("ifIndex")
+            print(f"DEBUG: Używam do mapowania pole: {identifier_field if port.get(identifier_field) else 'ifIndex'}; wartość: {value}")
             template_port_num = None
 
-            if identifier_field == 'ifName' and regex_pattern:
-                template_port_num = drawio_utils.parse_port_number_from_string(port_id_value, regex_pattern)
-            elif port_id_value and port_id_value.isdigit():
-                template_port_num = port_id_value
+            # Jeśli wartość nie jest czysto numeryczna, spróbuj wyłuskać numer przez regex
+            if value and not str(value).isdigit() and regex_pattern:
+                template_port_num = drawio_utils.parse_port_number_from_string(value, regex_pattern)
+            elif value and str(value).isdigit():
+                template_port_num = str(value)
 
             if template_port_num:
                 status = 'down'
-                oper_status = port.get('ifOperStatus', 'down').lower()
-
+                oper_status = str(port.get(oper_status_field, 'down')).lower()
                 if oper_status in ['up', 'testing']:
                     status = 'up'
-
-                mapped_ports[str(template_port_num)] = {'status': status, 'raw_data': port}
-
+                mapped_ports[str(template_port_num)] = {
+                    'status': status,
+                    'raw_data': port,
+                    'alias': port.get(alias_field, '')
+                }
+                print(f"DEBUG MAPPED: Port '{template_port_num}' – alias: '{port.get(alias_field, '')}', status: '{status}'")
+            else:
+                print(f"DEBUG: Nie można wyodrębnić numeru portu z wartości '{value}' przy użyciu regex '{regex_pattern}'")
         return mapped_ports
 
     def add_switch(self, device_name, device_ports_data):
@@ -83,7 +105,13 @@ class DiagramBuilder:
         mapped_ports = self._map_ports_to_template(device_ports_data)
         print(f"DEBUG: Mapped ports for {device_name}: {list(mapped_ports.keys())}")
         if not mapped_ports:
-            print(f"WARN: No ports could be mapped for device {device_name} based on config.")
+            print(f"WARN: Nie udało się zmapować żadnego portu dla urządzenia {device_name} na podstawie konfiguracji.")
+
+        print("DEBUG: Szczegółowe dane z mapowania portów:")
+        for port_key, port_data in mapped_ports.items():
+            alias = port_data.get('alias', '')
+            status = port_data.get('status', 'unknown')
+            print(f"  Port {port_key}: alias='{alias}', status='{status}'")
 
         template_elements = self.template.get_template_elements()
         id_map = {}
@@ -113,7 +141,7 @@ class DiagramBuilder:
 
             elements_to_add.append(new_group_element)
         else:
-            print("DEBUG: No group element in template. Positioning children absolutely.")
+            print("DEBUG: Brak grupy w szablonie – elementy będą pozycjonowane absolutnie.")
 
         for child_template in self.template.child_elements:
             new_child = copy.deepcopy(child_template)
@@ -145,22 +173,22 @@ class DiagramBuilder:
 
                 if port_info and 'raw_data' in port_info:
                     raw_port_data = port_info['raw_data']
-                    oper_status = raw_port_data.get('ifOperStatus', 'down').lower()
+                    oper_status = str(raw_port_data.get('ifOperStatus', 'down')).lower()
                     if oper_status in ['up', 'testing']:
                         fill_color = config.PORT_UP_COLOR
                     else:
                         fill_color = config.PORT_DOWN_COLOR
                 else:
-                    print(f"WARN: Port {port_number_value} from template not found in API data for {device_name}. Using default color.")
+                    print(f"WARN: Port {port_number_value} nie został znaleziony w danych API dla urządzenia {device_name}. Używam domyślnego koloru.")
 
                 style = new_child.get('style', '')
                 new_style = drawio_utils.modify_style(style, {'fillColor': fill_color})
                 new_child.set('style', new_style)
 
-                # Draw line and label
+                # Rysowanie linii i etykiety
                 port_data = mapped_ports.get(port_number_value)
                 if port_data:
-                    alias = port_data['raw_data'].get('ifAlias', '')
+                    alias = port_data.get('alias', '')
                     port_geometry = new_child.find("./mxGeometry")
                     if port_geometry is not None:
                         x = float(port_geometry.get('x', 0)) + pos_x

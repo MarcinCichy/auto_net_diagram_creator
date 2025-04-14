@@ -19,16 +19,17 @@ def modify_style(style_str, new_styles):
     if 'fillColor' in styles and (not styles['fillColor'] or styles['fillColor'].lower() == 'none'):
         del styles['fillColor']
 
-    return ";".join(f"{k}={v}" for k, v in styles.items() if v) + ";"  # Always end with ;
+    return ";".join(f"{k}={v}" for k, v in styles.items() if v) + ";"
 
 def parse_port_number_from_string(input_string, regex_pattern):
     """
     Extracts the port number from a string (like ifName, ifAlias)
     using the provided regex pattern.
+    Uses re.IGNORECASE to handle different letter cases.
     """
     if not input_string or not regex_pattern:
         return None
-    match = re.search(regex_pattern, input_string)
+    match = re.search(regex_pattern, input_string, re.IGNORECASE)
     if match:
         return match.groups()[-1] if match.groups() else match.group(0)
     else:
@@ -80,8 +81,7 @@ class DrawioTemplate:
                     self.dimensions['height'] = float(geometry.get('height', 0))
                     self.base_coords['x'] = float(geometry.get('x', 0))
                     self.base_coords['y'] = float(geometry.get('y', 0))
-                    print(f"INFO: Group dimensions: W={self.dimensions['width']}, H={self.dimensions['height']}. "
-                          f"Base coords: X={self.base_coords['x']}, Y={self.base_coords['y']}")
+                    print(f"INFO: Group dimensions: W={self.dimensions['width']}, H={self.dimensions['height']}. Base coords: X={self.base_coords['x']}, Y={self.base_coords['y']}")
                 else:
                     print("WARN: Group element has no <mxGeometry>. Calculating bounds from children.")
                     self._calculate_bounds_from_elements(self.child_elements)
@@ -94,7 +94,6 @@ class DrawioTemplate:
 
             if not self.port_elements:
                 print("WARN: No port elements identified in the template based on numeric value and 'rounded=0;'.")
-
         except FileNotFoundError:
             raise FileNotFoundError(f"Template file not found: {self.filepath}")
         except ET.ParseError as e:
@@ -121,8 +120,7 @@ class DrawioTemplate:
 
         self.base_coords = {'x': min_x, 'y': min_y}
         self.dimensions = {'width': max_x - min_x, 'height': max_y - min_y}
-        print(f"INFO: Calculated bounds: W={self.dimensions['width']}, H={self.dimensions['height']}. "
-              f"Base coords: X={self.base_coords['x']}, Y={self.base_coords['y']}")
+        print(f"INFO: Calculated bounds: W={self.dimensions['width']}, H={self.dimensions['height']}. Base coords: X={self.base_coords['x']}, Y={self.base_coords['y']}")
 
     def get_template_elements(self):
         elements = []

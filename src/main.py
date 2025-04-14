@@ -1,4 +1,3 @@
-# src/main.py
 import sys
 import config
 from librenms_client import LibreNMSClient
@@ -28,7 +27,7 @@ def run():
         ip_list_file = config.get_ip_list_file()
         ip_addresses = read_ip_list(ip_list_file)
         if not ip_addresses:
-            sys.exit(1) # Exit if IP list is empty or not found
+            sys.exit(1)
 
         template_file = config.get_switch_template_file()
         output_file = config.get_output_diagram_file()
@@ -36,19 +35,21 @@ def run():
         # 2. Initialize Components
         print("INFO: Initializing components...")
         nms_client = LibreNMSClient()
-        template = DrawioTemplate(template_file) # Errors handled within constructor
+        template = DrawioTemplate(template_file)  # Load Draw.io template
         builder = DiagramBuilder(template)
 
-        # 3. Process Switches
-        total_switches = len(ip_addresses)
-        for i, ip_address in enumerate(ip_addresses):
-            print(f"\n--- Processing device {i+1}/{total_switches}: {ip_address} ---")
-            ports_data = nms_client.get_device_ports(ip_address)
+        # 3. Process Each Device
+        total_devices = len(ip_addresses)
+        for i, device in enumerate(ip_addresses):
+            print(f"\n--- Processing device {i+1}/{total_devices}: {device} ---")
+            # Pobieramy porty z extended API
+            port_list = nms_client.get_device_ports(device)
+            if not port_list:
+                print(f"WARN: Skipping device {device} due to failure fetching port list.")
+                continue
 
-            if ports_data is not None:
-                builder.add_switch(ip_address, ports_data)
-            else:
-                print(f"WARN: Skipping device {ip_address} due to failure fetching port data.")
+            print(f"INFO: Device {device} - uzyskano szczegółowe dane dla {len(port_list)} portów.")
+            builder.add_switch(device, port_list)
 
         # 4. Save Diagram
         builder.save_diagram(output_file)
@@ -56,19 +57,16 @@ def run():
     except FileNotFoundError as e:
          print(f"ERROR: Required file not found: {e}")
          sys.exit(1)
-    except ValueError as e: # Catches config errors, template parsing errors
+    except ValueError as e:
          print(f"ERROR: Configuration or setup error: {e}")
          sys.exit(1)
     except Exception as e:
          print(f"FATAL: An unexpected error occurred: {e}")
          import traceback
-         traceback.print_exc() # Print detailed traceback for unexpected errors
+         traceback.print_exc()
          sys.exit(1)
 
     print("\n--- Diagram Generation Finished ---")
 
-
 if __name__ == "__main__":
-    # This allows running the main logic by executing `python -m src.main`
-    # from the project root directory.
     run()

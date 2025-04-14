@@ -55,21 +55,26 @@ class LibreNMSClient:
 
     def get_device_ports(self, device_hostname_or_ip):
         """
-        Fetches port information for a specific device.
-        Uses the hostname or IP address as the device identifier.
+        Fetches extended port information for a specific device.
+        Endpoint: GET devices/{device}/ports?extended=1
+        Zwraca listę portów (przez klucz "port" lub "ports").
         """
-        print(f"INFO: Fetching ports for device: {device_hostname_or_ip}")
+        print(f"INFO: Fetching extended port info for device: {device_hostname_or_ip}")
         safe_device_id = requests.utils.quote(device_hostname_or_ip)
-        endpoint = f"devices/{safe_device_id}/ports"
+        endpoint = f"devices/{safe_device_id}/ports?extended=1"
         data = self._make_request(endpoint)
+        print(f"DEBUG: Surowe dane z API:\n{json.dumps(data, indent=2)}")
 
         if data and isinstance(data, dict) and data.get('status') == 'ok':
-            count = len(data.get('ports', []))
-            print(f"INFO: Successfully retrieved {count} ports for {device_hostname_or_ip}")
-            return data.get('ports', [])
+            # Przyjmujemy, że dane są zwracane pod kluczem "port" lub "ports"
+            ports_key = "port" if "port" in data else "ports"
+            port_list = data.get(ports_key, [])
+            count = len(port_list)
+            print(f"INFO: Successfully retrieved {count} port(s) for device {device_hostname_or_ip}")
+            return port_list
         elif data and isinstance(data, dict):
-            print(f"WARN: Could not retrieve ports for {device_hostname_or_ip}. API Status: {data.get('status')}, Message: {data.get('message')}")
+            print(f"WARN: Could not retrieve extended port info for {device_hostname_or_ip}. API Status: {data.get('status')}, Message: {data.get('message')}")
             return None
         else:
-            print(f"WARN: Failed to get valid data from API for {device_hostname_or_ip} (data is None or not a dict).")
+            print(f"WARN: Failed to get valid port list from API for {device_hostname_or_ip} (data is None or not a dict).")
             return None
