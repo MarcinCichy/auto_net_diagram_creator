@@ -1,13 +1,18 @@
 # diagram_builder.py
+
 import json
+import re
 import xml.etree.ElementTree as ET
 from librenms_api import LibreNMSAPI
+from pysnmp.hlapi import *
 
 TEMPLATE_FILE = "switch.drawio"
 
 
+#############################################
+# Funkcje pomocnicze dotyczące szablonu
+#############################################
 def load_template(filename=TEMPLATE_FILE) -> ET.ElementTree:
-    """Ładuje szablon diagramu z pliku XML."""
     try:
         tree = ET.parse(filename)
         return tree
@@ -18,19 +23,14 @@ def load_template(filename=TEMPLATE_FILE) -> ET.ElementTree:
 
 def find_port_cells(root: ET.Element) -> list:
     """
-    Znajduje komórki reprezentujące porty w szablonie.
-    Zakładamy, że porty znajdują się w grupie o id 'wdXZIc1yJ1iBE2bjXRa4-1'.
+    Szuka komórek, których 'value' to same cyfry (np. '1', '2', '3').
+    Dostosuj kryterium, jeśli Twój szablon oznacza porty inaczej.
     """
-    groups = root.findall(".//mxCell[@id='wdXZIc1yJ1iBE2bjXRa4-1']")
-    if not groups:
-        print("Nie znaleziono grupy portów w szablonie.")
-        return []
-    port_group = groups[0]
-    # Wybieramy wszystkie komórki potomne, które mają niepusty atrybut 'value'
-    port_cells = [
-        cell for cell in port_group.findall("mxCell")
-        if cell.get("value") and cell.get("value").strip() != ""
-    ]
+    port_cells = []
+    for cell in root.iter("mxCell"):
+        val = cell.get("value", "").strip()
+        if val.isdigit():
+            port_cells.append(cell)
     try:
         port_cells.sort(key=lambda c: int(c.get("value").strip()))
     except Exception as e:
@@ -38,149 +38,254 @@ def find_port_cells(root: ET.Element) -> list:
     return port_cells
 
 
-def add_api_info_to_template(tree: ET.ElementTree, api: LibreNMSAPI, device_id: str) -> None:
+def reassign_ids(root_cell: ET.Element, device_index: int):
     """
-    Pobiera porty dla danego urządzenia (device_id) z API,
-    a następnie w szablonie (switch.drawio) dla każdego portu – w kolejności –
-    zmienia tło portu na zielone, jeśli aktywny, oraz dodaje linię
-    wychodzącą w górę/dół i etykietę z ifName + ifAlias.
+    Dla wszystkich <mxCell> w root_cell zmieniamy id, parent, source, target:
+    dodajemy sufix '_device{device_index}' aby uniknąć duplikatów w globalnym pliku.
     """
-    ports = api.get_ports(device_id)
-    print("API - Znalezione porty:")
-    print(json.dumps(ports, indent=2, ensure_ascii=False))
+    id_map = {}
+    for cell in root_cell.findall("./mxCell"):
+        old_id = cell.get("id")
+        if old_id:
+            new_id = f"{old_id}_device{device_index}"
+            id_map[old_id] = new_id
 
-    # Uzupełniamy dane portów – jeśli ifAlias jest pusty, pozostawiamy pusty ciąg
-    for port in ports:
-        if not port.get("ifAlias"):
-            port["ifAlias"] = ""
-    print("API - Zaktualizowane dane portów (z opisami):")
-    print(json.dumps(ports, indent=2, ensure_ascii=False))
+    for cell in root_cell.findall("./mxCell"):
+        old_id = cell.get("id")
+        if old_id in id_map:
+            cell.set("id", id_map[old_id])
+        old_parent = cell.get("parent")
+        if old_parent in id_map:
+            cell.set("parent", id_map[old_parent])
+        old_source = cell.get("source")
+        if old_source in id_map:
+            cell.set("source", id_map[old_source])
+        old_target = cell.get("target")
+        if old_target in id_map:
+            cell.set("target", id_map[old_target])
 
-    root = tree.getroot()  # element <mxfile> lub <mxGraphModel>
-    root_cell = root.find(".//root")
-    if root_cell is None:
-        print("Nie znaleziono elementu 'root' w szablonie.")
+
+#############################################
+# Funkcja dodająca dane urządzenia do globalnego diagramu
+#############################################
+def add_api_info_to_template(global_tree: ET.ElementTree,
+                             api: LibreNMSAPI,
+                             device_info: dict,
+                             device_index: int = 1,
+                             offset_x: float = 0,
+                             offset_y: float = 0) -> None:
+    """
+    1. Ładuje szablon (switch.drawio) i dokonuje reassign_ids.
+    2. Oblicza bounding box fragmentu i normalizuje pozycje (lewy górny róg -> 0,0).
+    3. Tworzy "grupę" (kontener) dla urządzenia – wszystkie obiekty mają atrybut parent ustawiony na id grupy.
+    4. Dodaje do grupy modyfikacje (kolorowanie portów, etykiety, informacje o urządzeniu) oraz
+       ustawia położenie grupy (offset_x, offset_y).
+    5. Wszystkie mxCell są dodawane jako rodzeństwo do globalnego <root>.
+    """
+    device_tree = load_template()
+    if device_tree is None:
+        return
+    device_root_cell = device_tree.getroot().find(".//root")
+    if device_root_cell is None:
+        print("Nie znaleziono <root> w szablonie urządzenia.")
         return
 
-    port_cells = find_port_cells(root)
-    if not port_cells:
-        print("Brak portów w szablonie.")
-        return
+    # Reassignuj ID, by uniknąć konfliktów
+    reassign_ids(device_root_cell, device_index)
 
-    count = min(len(port_cells), len(ports))
-    print(f"Przetwarzam {count} portów (Szablon: {len(port_cells)}, API: {len(ports)})")
-
-    for i in range(count):
-        api_port = ports[i]
-        port_cell = port_cells[i]
-        port_number = i + 1
-
-        ifName = api_port.get("ifName", f"Port {port_number}")
-        ifAlias = api_port.get("ifAlias", "")
-        oper_status = api_port.get("ifOperStatus", "down")
-        used = (oper_status.lower() == "up")
-
-        # Modyfikujemy styl istniejącego portu – jeżeli port jest aktywny, dajemy zielone tło
-        # style="rounded=0;whiteSpace=wrap;html=1;autosize=1;rotation=0;"
-        old_style = port_cell.get("style", "")
-        if used:
-            # Dodaj fillColor=#b7e1cd (lub inny odcień zieleni) do stylu
-            if "fillColor" not in old_style:
-                new_style = old_style + ";fillColor=#b7e1cd;"
-            else:
-                # Podmieniamy istniejący fillColor
-                parts = old_style.split(";")
-                parts = [p for p in parts if not p.startswith("fillColor")]
-                new_style = ";".join(parts) + ";fillColor=#b7e1cd;"
-            port_cell.set("style", new_style)
-
-        # Pobieramy współrzędne portu
-        geom = port_cell.find("mxGeometry")
+    # Oblicz bounding box
+    min_x = float('inf')
+    min_y = float('inf')
+    max_x = float('-inf')
+    max_y = float('-inf')
+    for cell in device_root_cell.findall("./mxCell"):
+        geom = cell.find("mxGeometry")
         if geom is not None:
             try:
                 x = float(geom.get("x", "0"))
                 y = float(geom.get("y", "0"))
-            except ValueError:
-                x, y = 0, 0
+                w = float(geom.get("width", "0"))
+                h = float(geom.get("height", "0"))
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x + w)
+                max_y = max(max_y, y + h)
+            except Exception:
+                continue
+    if min_x == float('inf'):
+        min_x = 0
+    if min_y == float('inf'):
+        min_y = 0
+    width = max_x - min_x
+    height = max_y - min_y
+
+    # Normalizujemy – przesuwamy wszystkie elementy, aby lewy górny róg był (0,0)
+    for cell in device_root_cell.findall("./mxCell"):
+        geom = cell.find("mxGeometry")
+        if geom is not None:
+            try:
+                x = float(geom.get("x", "0"))
+                y = float(geom.get("y", "0"))
+                geom.set("x", str(x - min_x))
+                geom.set("y", str(y - min_y))
+            except Exception:
+                continue
+
+    # Pobierz globalny <root> z global_tree – wszystkie mxCell będą dodawane bezpośrednio do niego
+    global_root = global_tree.getroot().find("./root")
+    if global_root is None:
+        print("Brak <root> w globalnym pliku draw.io.")
+        return
+
+    # Utwórz grupę (kontener) dla urządzenia
+    group_id = f"group_device_{device_index}"
+    group_cell = ET.Element("mxCell", {
+        "id": group_id,
+        "value": "",
+        "style": "group",
+        "vertex": "1",
+        "parent": "1"  # Dodajemy grupę jako bezpośrednie dziecko <root>
+    })
+    group_geom = ET.SubElement(group_cell, "mxGeometry", {
+        "x": str(offset_x),
+        "y": str(offset_y),
+        "width": str(width),
+        "height": str(height),
+        "as": "geometry"
+    })
+    # Dodaj grupę do globalnego <root>
+    global_root.append(group_cell)
+
+    # Teraz przekaż wszystkie komórki z szablonu – ustawiając ich parent na group_id – ale dodaj je bezpośrednio do global_root
+    for child in list(device_root_cell):
+        child.set("parent", group_id)
+        global_root.append(child)
+
+    # Pobierz porty z API – na podstawie device_id
+    device_id = device_info.get("device_id")
+    ports_data = api.get_ports(str(device_id))
+    print(
+        f"Urządzenie {device_id}, portów w szablonie: {len(find_port_cells(device_root_cell))}, w API: {len(ports_data)}")
+    # W grupie szukamy portów – ponieważ wszystkie elementy zostały przepisane z szablonu
+    port_cells = find_port_cells(global_root)  # Wyszukujemy we wszystkich elementach global_root, ale
+    # tylko te, które należą do naszej grupy (mają parent == group_id)
+    # Możemy filtrować:
+    port_cells = [cell for cell in port_cells if cell.get("parent") == group_id]
+    count = min(len(port_cells), len(ports_data))
+
+    # Parametry do rysowania linii i etykiet
+    line_length = 25
+    label_offset_x = 5
+    top_ports_count = count // 2
+
+    for i in range(count):
+        api_port = ports_data[i]
+        port_cell = port_cells[i]
+
+        # Kolor portu
+        status = api_port.get("ifOperStatus", "").lower()
+        color = "#00FF00" if status == "up" else "#FF0000"
+        current_style = port_cell.get("style", "")
+        if "fillColor=" in current_style:
+            new_style = re.sub(r"fillColor=[^;]+", f"fillColor={color}", current_style)
         else:
-            x, y = 0, 0
+            if not current_style.endswith(";"):
+                current_style += ";"
+            new_style = current_style + f"fillColor={color};"
+        port_cell.set("style", new_style)
 
-        # Logika określająca kierunek linii (góra/dół)
-        # Przykład: jeżeli y < 20 => górny rząd => linia wychodzi w górę
-        # jeżeli y >= 20 => dolny rząd => linia wychodzi w dół
-        if y < 20:
-            # Górny rząd
-            label_x = x
-            label_y = y - 40  # odsuń etykietę w górę
+        # Pobieramy geometrię portu do obliczenia pozycji etykiety i krawędzi
+        geom = port_cell.find("mxGeometry")
+        if geom is None:
+            continue
+        try:
+            px = float(geom.get("x", "0")) + float(geom.get("width", "40")) / 2
+            py = float(geom.get("y", "0"))
+            ph = float(geom.get("height", "40"))
+        except:
+            continue
+
+        # Obliczamy pozycję linii – w zależności od tego, czy port jest "górny" czy "dolny"
+        if i < top_ports_count:
+            start_y = py
+            end_y = py - line_length
         else:
-            # Dolny rząd
-            label_x = x
-            label_y = y + 30  # odsuń etykietę w dół
+            start_y = py + ph
+            end_y = py + ph + line_length
 
-        # Tworzymy etykietę (ifName + ifAlias)
-        full_label = f"Port {port_number}: {ifName}"
-        if ifAlias:
-            full_label += f"\n{ifAlias}"
+        # Tworzymy krawędź (edge)
+        edge_id = f"edge_{device_index}_{i}"
+        edge_cell = ET.Element("mxCell", {
+            "id": edge_id,
+            "value": "",
+            "style": "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#000000;",
+            "edge": "1",
+            "parent": group_id,  # Atrybut parent wskazuje na naszą grupę
+            "source": port_cell.get("id"),
+            "target": ""  # Będziemy ustawiać target na etykietę
+        })
+        edge_geom = ET.SubElement(edge_cell, "mxGeometry", {
+            "relative": "1",
+            "as": "geometry"
+        })
+        ET.SubElement(edge_geom, "mxPoint", {
+            "as": "sourcePoint",
+            "x": str(px),
+            "y": str(start_y)
+        })
+        ET.SubElement(edge_geom, "mxPoint", {
+            "as": "targetPoint",
+            "x": str(px),
+            "y": str(end_y)
+        })
+        global_root.append(edge_cell)  # Dodajemy krawędź do global_root
 
-        new_label_id = f"api_label_{port_number}"
-        new_label_cell = ET.SubElement(
-            root_cell,
-            "mxCell",
-            {
-                "id": new_label_id,
-                "value": full_label,
-                "style": "rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;",
-                "vertex": "1",
-                "parent": "1"
-            }
+        # Tworzymy etykietę portu (osobne mxCell) z informacjami z API
+        label_text = (
+            f"{api_port.get('ifName', '')}\n"
+            f"{api_port.get('ifIndex', '')}\n"
+            f"{api_port.get('ifPhysAddress', '')}\n"
+            f"{api_port.get('ifAlias', '')}"
         )
-        ET.SubElement(
-            new_label_cell,
-            "mxGeometry",
-            {
-                "x": str(label_x),
-                "y": str(label_y),
-                "width": "120",
-                "height": "40",
-                "as": "geometry"
-            }
-        )
+        label_id = f"label_{device_index}_{i}"
+        label_cell = ET.Element("mxCell", {
+            "id": label_id,
+            "value": label_text,
+            "style": "text;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;",
+            "vertex": "1",
+            "parent": group_id
+        })
+        label_geom = ET.SubElement(label_cell, "mxGeometry", {
+            "x": str(px + label_offset_x),
+            "y": str(end_y - 10),
+            "width": "120",
+            "height": "50",
+            "as": "geometry"
+        })
+        global_root.append(label_cell)  # Dodaj etykietę do global_root
 
-        # Dodajemy krawędź
-        new_edge_id = f"api_edge_{port_number}"
-        new_edge = ET.SubElement(
-            root_cell,
-            "mxCell",
-            {
-                "id": new_edge_id,
-                "value": "",
-                "style": "endArrow=block;dashed=1;",
-                "edge": "1",
-                "parent": "1",
-                "source": port_cell.get("id"),
-                "target": new_label_id
-            }
-        )
-        ET.SubElement(
-            new_edge,
-            "mxGeometry",
-            {
-                "relative": "1",
-                "as": "geometry"
-            }
-        )
+        # Ustawiamy target krawędzi na id etykiety
+        edge_cell.set("target", label_id)
 
-        print(
-            f"[Port {port_number}] {ifName} - {ifAlias} (Status: {oper_status}) => styl: {port_cell.get('style', '')}")
-
-
-def build_diagram_for_device_id(api: LibreNMSAPI, device_id: str) -> str:
-    """
-    Buduje diagram dla danego urządzenia na podstawie portów pobranych z API.
-    Ładuje szablon switch.drawio, uzupełnia go o dane z API i zwraca diagram jako XML string.
-    """
-    tree = load_template()
-    if tree is None:
-        return ""
-    add_api_info_to_template(tree, api, device_id)
-    return ET.tostring(tree.getroot(), encoding="utf-8", method="xml").decode("utf-8")
+    # Dodajmy etykietę z informacjami o urządzeniu (device_id, hostname, sysName)
+    dev_info_id = f"device_info_{device_index}"
+    device_label = (
+        f"device_id: {device_info.get('device_id')}\n"
+        f"hostname: {device_info.get('hostname', '')}\n"
+        f"sysName: {device_info.get('sysName', '')}"
+    )
+    dev_info_cell = ET.Element("mxCell", {
+        "id": dev_info_id,
+        "value": device_label,
+        "style": "text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=12;",
+        "vertex": "1",
+        "parent": group_id
+    })
+    dev_info_geom = ET.SubElement(dev_info_cell, "mxGeometry", {
+        "x": "10",
+        "y": "10",
+        "width": "160",
+        "height": "60",
+        "as": "geometry"
+    })
+    global_root.append(dev_info_cell)

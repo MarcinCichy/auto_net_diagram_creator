@@ -1,6 +1,6 @@
-# librenms_api.py
-import requests
+# librenms_appi.py
 
+import requests
 
 class LibreNMSAPI:
     def __init__(self, base_url, api_key):
@@ -40,26 +40,13 @@ class LibreNMSAPI:
             return []
 
     def get_port_description(self, port_id):
-        """
-        Pobiera opis portu (ifAlias) dla danego port_id.
-        Używa endpointu: /ports/{port_id}/description
-        Przykładowa odpowiedź: {"status": "ok", "port_description": "GigabitEthernet14"}
-        """
         data = self._get(f"ports/{port_id}/description")
         if isinstance(data, dict):
-            description = data.get("port_description", "")
-            print(f"DEBUG get_port_description dla port_id {port_id}: {description}")
-            return description
+            return data.get("port_description", "")
         return ""
 
     def get_port_alias(self, port_id):
-        """
-        Pobiera alias portu (ifAlias) dla danego port_id, używając endpointu: /ports/{port_id}/ifAlias.
-        Przykładowa odpowiedź: {"status": "ok", "ifAlias": "GigabitEthernet14"}
-        """
         data = self._get(f"ports/{port_id}/ifAlias")
         if isinstance(data, dict):
-            alias = data.get("ifAlias", "")
-            print(f"DEBUG get_port_alias dla port_id {port_id}: {alias}")
-            return alias
+            return data.get("ifAlias", "")
         return ""
