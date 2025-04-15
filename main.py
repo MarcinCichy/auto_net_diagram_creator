@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import json
 import xml.etree.ElementTree as ET
@@ -36,50 +34,67 @@ def main():
         print("Brak adresów IP do analizy w pliku ip_list.txt")
         return
 
-    # Pobieramy wszystkie urządzenia z LibreNMS (aby nie wykonywać zapytania dla każdego IP osobno)
+    # Pobieramy wszystkie urządzenia z LibreNMS
     devices = api.get_devices()
 
     # Tworzymy globalny diagram, do którego będą doklejane wszystkie urządzenia
     generator = DrawioXMLGenerator()
     global_tree = ET.ElementTree(generator.root)
 
-    # Ustalanie układu w siatce: liczba urządzeń w jednym wierszu, marginesy pomiędzy
-    devices_per_row = 3           # liczba urządzeń w jednym wierszu, dostosuj według potrzeb
-    margin_x = 1500               # odstęp poziomy pomiędzy urządzeniami (w pikselach)
-    margin_y = 300                # odstęp pionowy pomiędzy urządzeniami (w pikselach)
+    # Ustalanie układu – parametry do dynamicznego rozmieszczania
+    devices_per_row = 3               # liczba urządzeń w jednym wierszu
+    margin_between_devices_x = 40     # margines pomiędzy urządzeniami poziomo
+    margin_between_rows_y = 80        # margines pomiędzy wierszami
 
-    device_counter = 0  # numeracja urządzeń
+    # Pozycja startowa
+    offset_x = 0
+    offset_y = 0
+    current_row_max_height = 0  # zapamiętuje maksymalną wysokość w bieżącym wierszu
+
+    # Licznik urządzeń (do obliczania pozycji w siatce)
+    device_counter = 0
 
     for ip in ip_list:
         print(f"\n--- Przetwarzanie urządzenia o IP: {ip} ---")
         target_device = None
         for device in devices:
-            # Wyszukujemy urządzenie po adresie IP lub podciągu w hostname
+            # Wyszukiwanie urządzenia po adresie IP lub fragmencie w hostname
             if ip == device.get("ip") or ip in device.get("hostname", ""):
                 target_device = device
                 break
 
         if not target_device:
-            print(f"Nie znaleziono urządzenia o adresie IP {ip}.")
+            print(f"Nie znaleziono urządzenia o IP {ip}.")
             continue
 
         print("Wybrane urządzenie:")
         print(json.dumps(target_device, indent=2, ensure_ascii=False))
         device_counter += 1
 
-        # Obliczamy pozycję w siatce
-        row = (device_counter - 1) // devices_per_row
-        col = (device_counter - 1) % devices_per_row
-        offset_x = col * margin_x
-        offset_y = row * margin_y
-        print(f"Urządzenie {device_counter} pozycjonowane w siatce: kolumna {col}, wiersz {row} (offset: {offset_x}, {offset_y})")
+        # Wywołanie funkcji add_api_info_to_template, która teraz zwraca krotkę (width, height)
+        device_width, device_height = add_api_info_to_template(
+            global_tree,
+            api,
+            target_device,
+            device_counter,
+            offset_x,
+            offset_y
+        )
 
-        # Dodajemy informacje o urządzeniu (na podstawie szablonu) do globalnego diagramu,
-        # przekazując obliczony offset. Funkcja add_api_info_to_template odpowiada za
-        # dołączenie fragmentu diagramu (dla pojedynczego urządzenia) do globalnego drzewa.
-        add_api_info_to_template(global_tree, api, target_device, device_counter, offset_x, offset_y)
+        # Aktualizujemy offset_x do następnego urządzenia w wierszu
+        offset_x += device_width + margin_between_devices_x
 
-    # Zapisujemy finalny diagram z wszystkimi urządzeniami do pliku
+        # Uaktualniamy maksymalną wysokość w bieżącym wierszu
+        if device_height > current_row_max_height:
+            current_row_max_height = device_height
+
+        # Po ustawieniu określonej liczby urządzeń w wierszu, przechodzimy do nowego wiersza
+        if device_counter % devices_per_row == 0:
+            offset_x = 0
+            offset_y += current_row_max_height + margin_between_rows_y
+            current_row_max_height = 0
+
+    # Zapisujemy finalny diagram do pliku
     output_file = "network_diagram.drawio"
     with open(output_file, "w", encoding="utf-8") as f:
         diagram_xml = ET.tostring(global_tree.getroot(), encoding="utf-8", method="xml").decode("utf-8")

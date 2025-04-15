@@ -73,7 +73,7 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
                              device_info: dict,
                              device_index: int = 1,
                              offset_x: float = 0,
-                             offset_y: float = 0) -> None:
+                             offset_y: float = 0) -> tuple:
     """
     1. Ładuje szablon (switch.drawio) i dokonuje reassign_ids.
     2. Oblicza bounding box fragmentu i normalizuje pozycje (lewy górny róg -> 0,0).
@@ -167,9 +167,8 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
     print(
         f"Urządzenie {device_id}, portów w szablonie: {len(find_port_cells(device_root_cell))}, w API: {len(ports_data)}")
     # W grupie szukamy portów – ponieważ wszystkie elementy zostały przepisane z szablonu
-    port_cells = find_port_cells(global_root)  # Wyszukujemy we wszystkich elementach global_root, ale
-    # tylko te, które należą do naszej grupy (mają parent == group_id)
-    # Możemy filtrować:
+    port_cells = find_port_cells(global_root)  # wyszukujemy we wszystkich elementach global_root
+    # filtrowanie tylko tych, które należą do naszej grupy (mają parent == group_id)
     port_cells = [cell for cell in port_cells if cell.get("parent") == group_id]
     count = min(len(port_cells), len(ports_data))
 
@@ -220,7 +219,7 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
             "value": "",
             "style": "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#000000;",
             "edge": "1",
-            "parent": group_id,  # Atrybut parent wskazuje na naszą grupę
+            "parent": group_id,  # atrybut parent wskazuje na naszą grupę
             "source": port_cell.get("id"),
             "target": ""  # Będziemy ustawiać target na etykietę
         })
@@ -241,25 +240,40 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         global_root.append(edge_cell)  # Dodajemy krawędź do global_root
 
         # Tworzymy etykietę portu (osobne mxCell) z informacjami z API
-        label_text = (
-            f"{api_port.get('ifName', '')}\n"
-            f"{api_port.get('ifIndex', '')}\n"
-            f"{api_port.get('ifPhysAddress', '')}\n"
-            f"{api_port.get('ifAlias', '')}"
-        )
+        label_text = f"{api_port.get('ifAlias', '')}"
         label_id = f"label_{device_index}_{i}"
+
+        # Styl wymuszający pionowy układ tekstu:
+        #  - rotation=90 obraca całą etykietę o 90°
+        #  - horizontal=0 oznacza, że tekst jest renderowany w pionie
+        #  - labelPosition=middle;verticalLabelPosition=middle;align=center;verticalAlign=middle
+        #    starają się umieścić tekst centralnie w ramce
+        style_val = (
+            "text;html=1;"
+            "strokeColor=none;"
+            "fillColor=none;"
+            "fontSize=10;"
+            "align=center;"
+            "verticalAlign=middle;"
+            "horizontal=0;"
+            "labelPosition=middle;"
+            "verticalLabelPosition=middle;"
+            "rotation=180;"
+        )
+
         label_cell = ET.Element("mxCell", {
             "id": label_id,
             "value": label_text,
-            "style": "text;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=10;",
+            "style": style_val,
             "vertex": "1",
             "parent": group_id
         })
-        label_geom = ET.SubElement(label_cell, "mxGeometry", {
+        # Uwaga: width i height odwrócone, bo po obrocie "szerszy" wymiar staje się "wyższy"
+        ET.SubElement(label_cell, "mxGeometry", {
             "x": str(px + label_offset_x),
             "y": str(end_y - 10),
-            "width": "120",
-            "height": "50",
+            "width": "20",   # wąski na 20
+            "height": "80",  # wysoki na 80
             "as": "geometry"
         })
         global_root.append(label_cell)  # Dodaj etykietę do global_root
@@ -281,11 +295,13 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         "vertex": "1",
         "parent": group_id
     })
+    # etykiety urządzeń
     dev_info_geom = ET.SubElement(dev_info_cell, "mxGeometry", {
-        "x": "10",
-        "y": "10",
+        "x": "0",
+        "y": "-70",
         "width": "160",
         "height": "60",
         "as": "geometry"
     })
     global_root.append(dev_info_cell)
+    return (width, height)
