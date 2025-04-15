@@ -175,7 +175,7 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
     # Parametry do rysowania linii i etykiet
     line_length = 25
     label_offset_x = 5
-    top_ports_count = count // 2
+    lower_ports_count = count // 2
 
     for i in range(count):
         api_port = ports_data[i]
@@ -204,20 +204,27 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         except:
             continue
 
-        # Obliczamy pozycję linii – w zależności od tego, czy port jest "górny" czy "dolny"
-        if i < top_ports_count:
-            start_y = py
-            end_y = py - line_length
-        else:
-            start_y = py + ph
-            end_y = py + ph + line_length
+        # Pobieramy numer portu z wartości komórki (przyjmujemy, że porty są numerowane)
+        try:
+            port_number = int(port_cell.get("value", "0"))
+        except:
+            port_number = 0
+
+        # Dla portów górnych (numer nieparzysty) linia zaczyna się od górnej krawędzi i idzie w górę;
+        # dla portów dolnych (numer parzysty) linia zaczyna się od dolnej krawędzi i idzie w dół.
+        if port_number % 2 != 0:  # port numer nieparzysty – górny port
+            start_y = py  # zaczynamy od górnej krawędzi
+            end_y = py - line_length  # linia idzie w górę (odjęcie wartości)
+        else:  # port numer parzysty – dolny port
+            start_y = py + ph  # zaczynamy od dolnej krawędzi
+            end_y = py + ph + line_length  # linia idzie w dół (dodanie wartości)
 
         # Tworzymy krawędź (edge)
         edge_id = f"edge_{device_index}_{i}"
         edge_cell = ET.Element("mxCell", {
             "id": edge_id,
             "value": "",
-            "style": "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#000000;",
+            "style": "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#FFFFFF;",
             "edge": "1",
             "parent": group_id,  # atrybut parent wskazuje na naszą grupę
             "source": port_cell.get("id"),
@@ -244,7 +251,7 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         label_id = f"label_{device_index}_{i}"
 
         # Styl wymuszający pionowy układ tekstu:
-        #  - rotation=90 obraca całą etykietę o 90°
+        #  - rotation=180 obraca całą etykietę o 180° i t jest pion
         #  - horizontal=0 oznacza, że tekst jest renderowany w pionie
         #  - labelPosition=middle;verticalLabelPosition=middle;align=center;verticalAlign=middle
         #    starają się umieścić tekst centralnie w ramce
@@ -298,7 +305,7 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
     # etykiety urządzeń
     dev_info_geom = ET.SubElement(dev_info_cell, "mxGeometry", {
         "x": "0",
-        "y": "-70",
+        "y": "-100",
         "width": "160",
         "height": "60",
         "as": "geometry"
