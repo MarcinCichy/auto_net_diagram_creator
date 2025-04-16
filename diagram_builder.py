@@ -268,6 +268,32 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
             "rotation=180;"
         )
 
+        # Określamy oszacowaną wysokość pojedynczego wiersza (dla czcionki o rozmiarze 10/12 może to być około 12 jednostek)
+        line_height = 12
+        # Możesz ustalić dodatkowy margines, żeby zapewnić odstęp od linii
+        margin_top = 5
+        margin_bottom = 5
+
+        # Oszacowujemy liczbę wierszy – jeśli tekst nie zawiera "\n", to będzie jeden wiersz
+        num_lines = label_text.count("\n") + 1
+        estimated_label_height = num_lines * line_height
+
+        # Dla portów górnych (nieparzystych) etykieta ma być wyświetlona nad końcem linii,
+        # czyli przesunięcie to - (oszacowana wysokość etykiety + margines)
+        # Dla portów dolnych (parzystych) etykieta ma się wyświetlać poniżej końca linii, czyli dodajemy margines.
+        if port_number % 2 != 0:  # port nieparzysty (górny)
+            label_y = end_y - estimated_label_height - margin_top
+        else:  # port parzysty (dolny)
+            label_y = end_y + margin_bottom
+
+        # Ustal pozycję etykiety w zależności od rodzaju portu:
+        # 1. Dla portów górnych (nieparzystych) etykieta ma być wyświetlona powyżej końca linii
+        # 2. Dla portów dolnych (parzystych) etykieta ma być wyświetlona poniżej końca linii
+        if port_number % 2 != 0:
+            label_y = end_y - 120  # Przesunięcie w górę; 80 to przykładowa wysokość etykiety
+        else:
+            label_y = end_y + 40  # Przesunięcie w dół; 10 to przykładowy margines
+
         label_cell = ET.Element("mxCell", {
             "id": label_id,
             "value": label_text,
@@ -278,7 +304,8 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         # Uwaga: width i height odwrócone, bo po obrocie "szerszy" wymiar staje się "wyższy"
         ET.SubElement(label_cell, "mxGeometry", {
             "x": str(px + label_offset_x),
-            "y": str(end_y - 10),
+            # "y": str(end_y - 10),
+            "y": str(label_y),
             "width": "20",   # wąski na 20
             "height": "80",  # wysoki na 80
             "as": "geometry"
@@ -304,8 +331,8 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
     })
     # etykiety urządzeń
     dev_info_geom = ET.SubElement(dev_info_cell, "mxGeometry", {
-        "x": "0",
-        "y": "-100",
+        "x": "-30",
+        "y": "-170",
         "width": "160",
         "height": "60",
         "as": "geometry"
