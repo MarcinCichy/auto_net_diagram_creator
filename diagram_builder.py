@@ -41,7 +41,7 @@ def find_port_cells(root: ET.Element) -> list:
 def reassign_ids(root_cell: ET.Element, device_index: int):
     """
     Dla wszystkich <mxCell> w root_cell zmieniamy id, parent, source, target:
-    dodajemy sufix '_device{device_index}' aby uniknąć duplikatów w globalnym pliku.
+    dodajemy sufiks '_device{device_index}' aby uniknąć duplikatów w globalnym pliku.
     """
     id_map = {}
     for cell in root_cell.findall("./mxCell"):
@@ -77,11 +77,12 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
     """
     1. Ładuje szablon (switch.drawio) i dokonuje reassign_ids.
     2. Oblicza bounding box fragmentu i normalizuje pozycje (lewy górny róg -> 0,0).
-    3. Tworzy "grupę" (kontener) dla urządzenia – wszystkie obiekty mają atrybut parent ustawiony na id grupy.
+    3. Tworzy "grupę" (kontener) dla urządzenia – wszystkie obiekty mają parent ustawiony na id grupy.
     4. Dodaje do grupy modyfikacje (kolorowanie portów, etykiety, informacje o urządzeniu) oraz
        ustawia położenie grupy (offset_x, offset_y).
     5. Wszystkie mxCell są dodawane jako rodzeństwo do globalnego <root>.
     """
+    # 1) Ładujemy szablon i reassignujemy id
     device_tree = load_template()
     if device_tree is None:
         return
@@ -90,10 +91,9 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         print("Nie znaleziono <root> w szablonie urządzenia.")
         return
 
-    # Reassignuj ID, by uniknąć konfliktów
     reassign_ids(device_root_cell, device_index)
 
-    # Oblicz bounding box
+    # 2) Obliczamy bounding box i normalizujemy pozycje
     min_x = float('inf')
     min_y = float('inf')
     max_x = float('-inf')
@@ -112,14 +112,11 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
                 max_y = max(max_y, y + h)
             except Exception:
                 continue
-    if min_x == float('inf'):
-        min_x = 0
-    if min_y == float('inf'):
-        min_y = 0
-    width = max_x - min_x
+    if min_x == float('inf'): min_x = 0
+    if min_y == float('inf'): min_y = 0
+    width  = max_x - min_x
     height = max_y - min_y
 
-    # Normalizujemy – przesuwamy wszystkie elementy, aby lewy górny róg był (0,0)
     for cell in device_root_cell.findall("./mxCell"):
         geom = cell.find("mxGeometry")
         if geom is not None:
@@ -131,131 +128,117 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
             except Exception:
                 continue
 
-    # Pobierz globalny <root> z global_tree – wszystkie mxCell będą dodawane bezpośrednio do niego
+    # 3) Przygotowujemy globalny root i tworzymy grupę
     global_root = global_tree.getroot().find("./root")
     if global_root is None:
         print("Brak <root> w globalnym pliku draw.io.")
         return
 
-    # Utwórz grupę (kontener) dla urządzenia
     group_id = f"group_device_{device_index}"
     group_cell = ET.Element("mxCell", {
-        "id": group_id,
+        "id":    group_id,
         "value": "",
         "style": "group",
-        "vertex": "1",
-        "parent": "1"  # Dodajemy grupę jako bezpośrednie dziecko <root>
+        "vertex":"1",
+        "parent":"1"
     })
-    group_geom = ET.SubElement(group_cell, "mxGeometry", {
-        "x": str(offset_x),
-        "y": str(offset_y),
-        "width": str(width),
+    ET.SubElement(group_cell, "mxGeometry", {
+        "x":      str(offset_x),
+        "y":      str(offset_y),
+        "width":  str(width),
         "height": str(height),
-        "as": "geometry"
+        "as":     "geometry"
     })
-    # Dodaj grupę do globalnego <root>
     global_root.append(group_cell)
 
-    # Teraz przekaż wszystkie komórki z szablonu – ustawiając ich parent na group_id – ale dodaj je bezpośrednio do global_root
+    # 4) Dodajemy wszystkie elementy z szablonu do grupy
     for child in list(device_root_cell):
         child.set("parent", group_id)
         global_root.append(child)
 
-    # Pobierz porty z API – na podstawie device_id
-    device_id = device_info.get("device_id")
+    # 5) Pobieramy dane portów i rysujemy krawędzie + etykiety
+    device_id  = device_info.get("device_id")
     ports_data = api.get_ports(str(device_id))
     print(
-        f"Urządzenie {device_id}, portów w szablonie: {len(find_port_cells(device_root_cell))}, w API: {len(ports_data)}")
-    # W grupie szukamy portów – ponieważ wszystkie elementy zostały przepisane z szablonu
-    port_cells = find_port_cells(global_root)  # wyszukujemy we wszystkich elementach global_root
-    # filtrowanie tylko tych, które należą do naszej grupy (mają parent == group_id)
-    port_cells = [cell for cell in port_cells if cell.get("parent") == group_id]
+        f"Urządzenie {device_id}, portów w szablonie: {len(find_port_cells(device_root_cell))}, "
+        f"w API: {len(ports_data)}"
+    )
+
+    port_cells = [c for c in find_port_cells(global_root) if c.get("parent") == group_id]
     count = min(len(port_cells), len(ports_data))
 
-    # Parametry do rysowania linii i etykiet
-    line_length = 25
+    # parametry rysowania
+    line_length    = 25
     label_offset_x = 5
-    lower_ports_count = count // 2
+    MARGIN         = 20  # stała przerwa między końcem linii a etykietą
+    LINE_HEIGHT    = 12  # wysokość pojedynczego wiersza tekstu
+    PADDING        = 4   # padding wewnątrz boxa etykiety
 
     for i in range(count):
-        api_port = ports_data[i]
+        api_port  = ports_data[i]
         port_cell = port_cells[i]
 
-        # Kolor portu
+        # kolorowanie portu
         status = api_port.get("ifOperStatus", "").lower()
-        color = "#00FF00" if status == "up" else "#FF0000"
-        current_style = port_cell.get("style", "")
-        if "fillColor=" in current_style:
-            new_style = re.sub(r"fillColor=[^;]+", f"fillColor={color}", current_style)
+        color  = "#00FF00" if status == "up" else "#FF0000"
+        style  = port_cell.get("style", "")
+        if "fillColor=" in style:
+            style = re.sub(r"fillColor=[^;]+", f"fillColor={color}", style)
         else:
-            if not current_style.endswith(";"):
-                current_style += ";"
-            new_style = current_style + f"fillColor={color};"
-        port_cell.set("style", new_style)
+            if not style.endswith(";"):
+                style += ";"
+            style += f"fillColor={color};"
+        port_cell.set("style", style)
 
-        # Pobieramy geometrię portu do obliczenia pozycji etykiety i krawędzi
+        # geometria portu
         geom = port_cell.find("mxGeometry")
         if geom is None:
             continue
-        try:
-            px = float(geom.get("x", "0")) + float(geom.get("width", "40")) / 2
-            py = float(geom.get("y", "0"))
-            ph = float(geom.get("height", "40"))
-        except:
-            continue
+        px = float(geom.get("x", "0")) + float(geom.get("width", "40"))/2
+        py = float(geom.get("y", "0"))
+        ph = float(geom.get("height", "40"))
 
-        # Pobieramy numer portu z wartości komórki (przyjmujemy, że porty są numerowane)
+        # numer portu
         try:
             port_number = int(port_cell.get("value", "0"))
         except:
             port_number = 0
 
-        # Dla portów górnych (numer nieparzysty) linia zaczyna się od górnej krawędzi i idzie w górę;
-        # dla portów dolnych (numer parzysty) linia zaczyna się od dolnej krawędzi i idzie w dół.
-        if port_number % 2 != 0:  # port numer nieparzysty – górny port
-            start_y = py  # zaczynamy od górnej krawędzi
-            end_y = py - line_length  # linia idzie w górę (odjęcie wartości)
-        else:  # port numer parzysty – dolny port
-            start_y = py + ph  # zaczynamy od dolnej krawędzi
-            end_y = py + ph + line_length  # linia idzie w dół (dodanie wartości)
+        # punkty krawędzi
+        if port_number % 2 != 0:
+            start_y = py
+            end_y   = py - line_length
+        else:
+            start_y = py + ph
+            end_y   = py + ph + line_length
 
-        # Tworzymy krawędź (edge)
-        edge_id = f"edge_{device_index}_{i}"
+        # tworzymy edge
+        edge_id   = f"edge_{device_index}_{i}"
         edge_cell = ET.Element("mxCell", {
-            "id": edge_id,
-            "value": "",
-            "style": "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#FFFFFF;",
-            "edge": "1",
-            "parent": group_id,  # atrybut parent wskazuje na naszą grupę
+            "id":     edge_id,
+            "value":  "",
+            "style":  "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#FFFFFF;",
+            "edge":   "1",
+            "parent": group_id,
             "source": port_cell.get("id"),
-            "target": ""  # Będziemy ustawiać target na etykietę
+            "target": ""
         })
         edge_geom = ET.SubElement(edge_cell, "mxGeometry", {
             "relative": "1",
-            "as": "geometry"
+            "as":       "geometry"
         })
         ET.SubElement(edge_geom, "mxPoint", {
-            "as": "sourcePoint",
-            "x": str(px),
-            "y": str(start_y)
+            "as": "sourcePoint", "x": str(px), "y": str(start_y)
         })
         ET.SubElement(edge_geom, "mxPoint", {
-            "as": "targetPoint",
-            "x": str(px),
-            "y": str(end_y)
+            "as": "targetPoint", "x": str(px), "y": str(end_y)
         })
-        global_root.append(edge_cell)  # Dodajemy krawędź do global_root
+        global_root.append(edge_cell)
 
-        # Tworzymy etykietę portu (osobne mxCell) z informacjami z API
-        label_text = f"{api_port.get('ifAlias', '')}"
-        label_id = f"label_{device_index}_{i}"
-
-        # Styl wymuszający pionowy układ tekstu:
-        #  - rotation=180 obraca całą etykietę o 180° i t jest pion
-        #  - horizontal=0 oznacza, że tekst jest renderowany w pionie
-        #  - labelPosition=middle;verticalLabelPosition=middle;align=center;verticalAlign=middle
-        #    starają się umieścić tekst centralnie w ramce
-        style_val = (
+        # tworzymy etykietę
+        label_text = api_port.get("ifAlias", "")
+        label_id   = f"label_{device_index}_{i}"
+        style_val  = (
             "text;html=1;"
             "strokeColor=none;"
             "fillColor=none;"
@@ -268,54 +251,40 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
             "rotation=180;"
         )
 
-        # Określamy oszacowaną wysokość pojedynczego wiersza (dla czcionki o rozmiarze 10/12 może to być około 12 jednostek)
-        line_height = 12
-        # Możesz ustalić dodatkowy margines, żeby zapewnić odstęp od linii
-        margin_top = 5
-        margin_bottom = 5
+        #––– TUTAJ: liczymy liczbę linii jako liczbę znaków (bo przy horizontal=0 każdy znak to nowy wiersz)
+        total_chars = sum(len(line) for line in label_text.split("\n"))
+        label_height = total_chars * LINE_HEIGHT + 2 * PADDING
+        label_width  = LINE_HEIGHT + 2 * PADDING  # kwadratowy box
+        label_x      = px + label_offset_x
 
-        # Oszacowujemy liczbę wierszy – jeśli tekst nie zawiera "\n", to będzie jeden wiersz
-        num_lines = label_text.count("\n") + 1
-        estimated_label_height = num_lines * line_height
-
-        # Dla portów górnych (nieparzystych) etykieta ma być wyświetlona nad końcem linii,
-        # czyli przesunięcie to - (oszacowana wysokość etykiety + margines)
-        # Dla portów dolnych (parzystych) etykieta ma się wyświetlać poniżej końca linii, czyli dodajemy margines.
-        if port_number % 2 != 0:  # port nieparzysty (górny)
-            label_y = end_y - estimated_label_height - margin_top
-        else:  # port parzysty (dolny)
-            label_y = end_y + margin_bottom
-
-        # Ustal pozycję etykiety w zależności od rodzaju portu:
-        # 1. Dla portów górnych (nieparzystych) etykieta ma być wyświetlona powyżej końca linii
-        # 2. Dla portów dolnych (parzystych) etykieta ma być wyświetlona poniżej końca linii
+        # pozycja Y z zachowaniem stałej przerwy
         if port_number % 2 != 0:
-            label_y = end_y - 120  # Przesunięcie w górę; 80 to przykładowa wysokość etykiety
+            # etykieta nad linią
+            label_y = end_y - MARGIN - label_height
         else:
-            label_y = end_y + 40  # Przesunięcie w dół; 10 to przykładowy margines
+            # etykieta pod linią
+            label_y = end_y + MARGIN
 
         label_cell = ET.Element("mxCell", {
-            "id": label_id,
-            "value": label_text,
-            "style": style_val,
+            "id":     label_id,
+            "value":  label_text,
+            "style":  style_val,
             "vertex": "1",
             "parent": group_id
         })
-        # Uwaga: width i height odwrócone, bo po obrocie "szerszy" wymiar staje się "wyższy"
         ET.SubElement(label_cell, "mxGeometry", {
-            "x": str(px + label_offset_x),
-            # "y": str(end_y - 10),
-            "y": str(label_y),
-            "width": "20",   # wąski na 20
-            "height": "80",  # wysoki na 80
-            "as": "geometry"
+            "x":      str(label_x),
+            "y":      str(label_y),
+            "width":  str(label_width),
+            "height": str(label_height),
+            "as":     "geometry"
         })
-        global_root.append(label_cell)  # Dodaj etykietę do global_root
+        global_root.append(label_cell)
 
-        # Ustawiamy target krawędzi na id etykiety
+        # łączymy edge z etykietą
         edge_cell.set("target", label_id)
 
-    # Dodajmy etykietę z informacjami o urządzeniu (device_id, hostname, sysName)
+    # dodajemy etykietę z informacjami o urządzeniu
     dev_info_id = f"device_info_{device_index}"
     device_label = (
         f"device_id: {device_info.get('device_id')}\n"
@@ -323,19 +292,19 @@ def add_api_info_to_template(global_tree: ET.ElementTree,
         f"sysName: {device_info.get('sysName', '')}"
     )
     dev_info_cell = ET.Element("mxCell", {
-        "id": dev_info_id,
-        "value": device_label,
-        "style": "text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=12;",
+        "id":     dev_info_id,
+        "value":  device_label,
+        "style":  "text;strokeColor=none;fillColor=none;align=left;verticalAlign=top;fontSize=12;",
         "vertex": "1",
         "parent": group_id
     })
-    # etykiety urządzeń
-    dev_info_geom = ET.SubElement(dev_info_cell, "mxGeometry", {
-        "x": "-30",
-        "y": "-170",
-        "width": "160",
+    ET.SubElement(dev_info_cell, "mxGeometry", {
+        "x":      "-30",
+        "y":      "-170",
+        "width":  "160",
         "height": "60",
-        "as": "geometry"
+        "as":     "geometry"
     })
     global_root.append(dev_info_cell)
+
     return (width, height)
