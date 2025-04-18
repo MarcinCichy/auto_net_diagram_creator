@@ -3,7 +3,7 @@
 import os
 import json
 import xml.etree.ElementTree as ET
-from config import get_config
+from config_loader import get_config
 from diagram_builder import add_api_info_to_template
 from librenms_api import LibreNMSAPI
 from drawio_generator import DrawioXMLGenerator

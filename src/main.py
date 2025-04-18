@@ -1,5 +1,5 @@
 import sys
-import config
+import config_loader
 from librenms_client import LibreNMSClient
 from drawio_utils import DrawioTemplate
 from diagram_builder import DiagramBuilder
@@ -29,8 +29,8 @@ def run():
         if not ip_addresses:
             sys.exit(1)
 
-        template_file = config.get_switch_template_file()
-        output_file = config.get_output_diagram_file()
+        template_file = config_loader.get_switch_template_file()
+        output_file = config_loader.get_output_diagram_file()
 
         # 2. Initialize Components
         print("INFO: Initializing components...")

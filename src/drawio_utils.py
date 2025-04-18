@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 import re
 import copy
-import config
+import config_loader
 
 def modify_style(style_str, new_styles):
     """Parses a draw.io style string, updates it, and returns the new string."""

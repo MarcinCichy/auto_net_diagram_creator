@@ -2,7 +2,7 @@ import xml.etree.ElementTree as ET
 import copy
 import math
 import uuid
-import config, drawio_utils
+import config_loader, drawio_utils
 import json
 
 class DiagramBuilder:
@@ -21,7 +21,7 @@ class DiagramBuilder:
             print(f"INFO: Template dimensions loaded: W={self.template_width}, H={self.template_height}")
 
         self.mxfile, self.root = self._create_diagram_base()
-        self.current_x = config.START_X
+        self.current_x = config_loader.START_X
         self.current_y = config.START_Y
         self.switch_count = 0
         self.max_x_in_row = 0
@@ -29,7 +29,7 @@ class DiagramBuilder:
     def _create_diagram_base(self):
         mxfile = ET.Element("mxfile", host="PythonScript", modified="...", agent="...", etag=str(uuid.uuid4()), version="1.0", type="device")
         diagram = ET.SubElement(mxfile, "diagram", id="diagram-1", name="Network Map")
-        page_width = str(config.START_X * 2 + self.template_width * config.SWITCHES_PER_ROW + config.SWITCH_SPACING_X * (config.SWITCHES_PER_ROW - 1)) if config.SWITCHES_PER_ROW > 0 else "827"
+        page_width = str(config.START_X * 2 + self.template_width * config.SWITCHES_PER_ROW + config_loader.SWITCH_SPACING_X * (config_loader.SWITCHES_PER_ROW - 1)) if config.SWITCHES_PER_ROW > 0 else "827"
         page_height = str(config.START_Y * 2 + self.template_height)
         mxGraphModel = ET.SubElement(diagram, "mxGraphModel", dx="1500", dy="1000", grid="1", gridSize="10", guides="1", tooltips="1", connect="1", arrows="1", fold="1", page="1", pageScale="1", pageWidth=page_width, pageHeight=page_height, math="0", shadow="0")
         root = ET.SubElement(mxGraphModel, "root")
@@ -49,11 +49,11 @@ class DiagramBuilder:
         """
         mapped_ports = {}
         # Pobierz ustawione pole – może to być ifName, ale jeśli nie ma zawartości, spróbujemy ifIndex.
-        identifier_field = config.get_port_identifier_field()
+        identifier_field = config_loader.get_port_identifier_field()
         alias_field = "ifAlias"
         oper_status_field = "ifOperStatus"  # rozszerzone API zwraca dane w tym polu
 
-        regex_pattern = config.get_port_number_regex() if identifier_field in ['ifName', 'ifAlias'] else None
+        regex_pattern = config_loader.get_port_number_regex() if identifier_field in ['ifName', 'ifAlias'] else None
 
         if not device_ports_data:
             return mapped_ports
@@ -95,10 +95,10 @@ class DiagramBuilder:
 
     def add_switch(self, device_name, device_ports_data):
         print(f"INFO: Adding switch '{device_name}' to diagram...")
-        col_index = self.switch_count % config.SWITCHES_PER_ROW
-        row_index = self.switch_count // config.SWITCHES_PER_ROW
-        pos_x = config.START_X + col_index * (self.template_width + config.SWITCH_SPACING_X)
-        pos_y = config.START_Y + row_index * (self.template_height + config.SWITCH_SPACING_Y)
+        col_index = self.switch_count % config_loader.SWITCHES_PER_ROW
+        row_index = self.switch_count // config_loader.SWITCHES_PER_ROW
+        pos_x = config.START_X + col_index * (self.template_width + config_loader.SWITCH_SPACING_X)
+        pos_y = config.START_Y + row_index * (self.template_height + config_loader.SWITCH_SPACING_Y)
         self.max_x_in_row = max(self.max_x_in_row, pos_x + self.template_width)
         print(f"INFO: Position calculated: X={pos_x}, Y={pos_y} (Switch {self.switch_count + 1})")
 
@@ -241,18 +241,18 @@ class DiagramBuilder:
         if self.switch_count == 0:
             return
 
-        num_rows = math.ceil(self.switch_count / config.SWITCHES_PER_ROW) if config.SWITCHES_PER_ROW > 0 else 1
-        width_per_switch = self.template_width + config.SWITCH_SPACING_X
-        effective_cols = min(self.switch_count, config.SWITCHES_PER_ROW) if config.SWITCHES_PER_ROW > 0 else 1
-        page_width = config.START_X + effective_cols * width_per_switch
+        num_rows = math.ceil(self.switch_count / config_loader.SWITCHES_PER_ROW) if config.SWITCHES_PER_ROW > 0 else 1
+        width_per_switch = self.template_width + config_loader.SWITCH_SPACING_X
+        effective_cols = min(self.switch_count, config_loader.SWITCHES_PER_ROW) if config_loader.SWITCHES_PER_ROW > 0 else 1
+        page_width = config_loader.START_X + effective_cols * width_per_switch
         if effective_cols > 0:
-            page_width -= config.SWITCH_SPACING_X
-        page_width += config.START_X
+            page_width -= config_loader.SWITCH_SPACING_X
+        page_width += config_loader.START_X
 
-        page_height = config.START_Y + num_rows * (self.template_height + config.SWITCH_SPACING_Y)
+        page_height = config_loader.START_Y + num_rows * (self.template_height + config.SWITCH_SPACING_Y)
         if num_rows > 0:
-            page_height -= config.SWITCH_SPACING_Y
-        page_height += config.START_Y
+            page_height -= config_loader.SWITCH_SPACING_Y
+        page_height += config_loader.START_Y
 
         diagram = self.mxfile.find('.//diagram')
         if diagram is not None:

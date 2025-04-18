@@ -1,12 +1,12 @@
 import requests
 import json
-import config
+import config_loader
 
 class LibreNMSClient:
     """Handles communication with the LibreNMS API."""
 
     def __init__(self):
-        self.base_url = config.get_librenms_url()
+        self.base_url = config_loader.get_librenms_url()
         self.token = config.get_librenms_token()
         self.headers = {'X-Auth-Token': self.token}
         if not self.base_url or not self.token:

@@ -9,7 +9,7 @@ from pysnmp.hlapi import (
     ObjectType, ObjectIdentity, nextCmd
 )
 from netmiko import ConnectHandler, NetmikoAuthenticationException, NetmikoTimeoutException
-from config import get_config
+from config_loader import get_config
 from librenms_api import LibreNMSAPI
 
 IP_LIST_FILE = "ip_list.txt"
