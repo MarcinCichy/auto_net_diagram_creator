@@ -3,3 +3,7 @@
 ip_list.txt
 id_list.txt
 LLM_descr.txt
+device_credentials.json
+connections.json
+connections.txt
+*.log
