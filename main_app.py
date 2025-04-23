@@ -1,59 +1,86 @@
+# --- main_app.py ---
 #!/usr/bin/env python3
 
-# main_app.py
 import sys
 import time
 import argparse
-import pprint # Do debugowania i ładnego drukowania mapowań
+import pprint # Do ładnego drukowania słowników (debug)
 import os
 import xml.etree.ElementTree as ET
-import re # Potrzebne do canonical ID i drawio_device_builder
+import re # Potrzebne do canonical ID
 
 # --- Importy z naszych modułów ---
-# Upewnij się, że wszystkie te pliki .py istnieją w tym samym katalogu
 import config_loader
 import file_io
 from librenms_client import LibreNMSAPI # Import klasy
 import data_processing
-import discovery # Poprawny import
+import discovery # Poprawny import modułu discovery
 import drawio_base
 import drawio_layout
-import drawio_device_builder # Importujemy cały moduł
-import drawio_utils # Import utils
+import drawio_device_builder # Importujemy cały moduł device_builder
+import drawio_utils # Import utils dla Draw.io
 
 # --- Stałe ---
 IP_LIST_FILE = "ip_list.txt"
 DEVICE_CREDENTIALS_FILE = "device_credentials.json"
 CONNECTIONS_TXT_FILE = "connections.txt"
 CONNECTIONS_JSON_FILE = "connections.json"
-DIAGRAM_TEMPLATE_FILE = "switch.drawio"
+DIAGRAM_TEMPLATE_FILE = "switch.drawio" # Domyślny szablon
 DIAGRAM_OUTPUT_FILE = "network_diagram.drawio"
 
 # --- Funkcje pomocnicze ---
 def find_device_in_list(identifier, all_devices_list):
-    """Wyszukuje urządzenie w liście z API po IP lub hostname (ignorując wielkość liter)."""
+    """
+    Wyszukuje urządzenie w liście pobranej z API po IP lub hostname (ignorując wielkość liter).
+    Zwraca słownik z danymi urządzenia lub None.
+    """
     if not identifier or not all_devices_list: return None
-    # Szukaj po IP
+    # 1. Szukaj po adresie IP
     for d in all_devices_list:
-        if d.get("ip") == identifier: return d
-    # Szukaj po hostname (dokładne dopasowanie, ignorując wielkość liter)
+        if d.get("ip") == identifier:
+            return d
+    # 2. Szukaj po hostname (ignorując wielkość liter)
     if isinstance(identifier, str):
         identifier_lower = identifier.lower()
         for d in all_devices_list:
             hostname_api = d.get("hostname")
-            if hostname_api and hostname_api.lower() == identifier_lower: return d
+            if hostname_api and hostname_api.lower() == identifier_lower:
+                return d
+    # 3. Spróbuj wyszukać po sysName (jako fallback, ignorując wielkość liter)
+    if isinstance(identifier, str):
+        identifier_lower = identifier.lower()
+        for d in all_devices_list:
+            sysname_api = d.get("sysName")
+            if sysname_api and sysname_api.lower() == identifier_lower:
+                 return d
+    # Nie znaleziono
     return None
 
-def get_canonical_identifier(original_identifier, device_info_from_api):
-    """Zwraca preferowany (kanoniczny) identyfikator dla urządzenia."""
-    if not device_info_from_api: return original_identifier
+def get_canonical_identifier(device_info_from_api, original_identifier=None):
+    """
+    Zwraca preferowany (kanoniczny) identyfikator dla urządzenia na podstawie jego danych z API.
+    Priorytet: purpose > hostname (jeśli nie jest IP) > ip > hostname (nawet jeśli IP) > original_identifier > device_id
+    """
+    if not device_info_from_api:
+        return original_identifier
     hostname = device_info_from_api.get('hostname')
     ip = device_info_from_api.get('ip')
-    looks_like_ip = False
-    if hostname: looks_like_ip = bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hostname))
-    if hostname and not looks_like_ip: return hostname
-    elif ip: return ip
-    else: return original_identifier
+    purpose = device_info_from_api.get('purpose')
+    hostname_looks_like_ip = False
+    if hostname:
+        hostname_looks_like_ip = bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', hostname))
+    if purpose and purpose.strip():
+        return purpose.strip()
+    elif hostname and not hostname_looks_like_ip:
+        return hostname
+    elif ip:
+        return ip
+    elif hostname and hostname_looks_like_ip:
+        return hostname
+    elif original_identifier:
+         return original_identifier
+    else:
+        return str(device_info_from_api.get('device_id', "(Brak ID)"))
 
 # --- Główne funkcje wykonawcze ---
 
@@ -61,337 +88,380 @@ def run_discovery(config, api_client, ip_list_path, creds_path, conn_txt_path, c
     """Wykonuje część aplikacji odpowiedzialną za odkrywanie połączeń."""
     print("\n=== Rozpoczynanie Fazy Odkrywania Połączeń ===")
     start_time = time.time()
+    # [Krok 1] Wczytaj specyficzne dane uwierzytelniające SNMP
     device_credentials = config_loader.load_device_credentials(creds_path)
+    # [Krok 2] Zbuduj globalną mapę MAC -> info o porcie (potrzebne do FDB/ARP)
     print("[Odkrywanie 1/5] Budowanie mapy MAC...")
     phys_map = data_processing.build_phys_mac_map(api_client)
-    if not phys_map: print("  Ostrzeżenie: Nie udało się zbudować mapy MAC.")
-
+    if not phys_map:
+        print("  Ostrzeżenie: Nie udało się zbudować mapy MAC. Metody FDB/ARP mogą nie działać poprawnie.")
+    # [Krok 3] Wczytaj listę urządzeń do przetworzenia
     print(f"[Odkrywanie 2/5] Wczytywanie listy urządzeń z {ip_list_path}...")
     target_ips_or_hosts = file_io.load_ip_list(ip_list_path)
     if not target_ips_or_hosts:
-        print("  Brak urządzeń do przetworzenia w fazie odkrywania.")
+        print("  Brak urządzeń docelowych na liście. Przerywam fazę odkrywania.")
         return
-
-    print("[Odkrywanie 3/5] Pobieranie pełnej listy urządzeń z API (dla mapowania)...")
-    all_devices_from_api = api_client.get_devices()
+    # [Krok 4] Pobierz pełną listę urządzeń z API (do mapowania nazw/IP na ID i pobierania 'purpose')
+    print("[Odkrywanie 3/5] Pobieranie pełnej listy urządzeń z API (dla mapowania i 'purpose')...")
+    all_devices_from_api = api_client.get_devices(columns="device_id,hostname,ip,sysName,purpose")
     if not all_devices_from_api:
          print("⚠ Nie udało się pobrać listy urządzeń z API. Przerywam odkrywanie.")
          return
+    # Tworzenie map dla szybkiego wyszukiwania urządzeń z API
     device_lookup_by_ip = {d.get("ip"): d for d in all_devices_from_api if d.get("ip")}
     device_lookup_by_hostname_lower = {d.get("hostname", "").lower(): d for d in all_devices_from_api if d.get("hostname")}
+    device_lookup_by_sysname_lower = {d.get("sysName", "").lower(): d for d in all_devices_from_api if d.get("sysName")}
 
+    # [Krok 5] Iteruj po urządzeniach z listy i uruchom metody odkrywania
     print("[Odkrywanie 4/5] Przetwarzanie urządzeń i odkrywanie połączeń...")
-    all_found_connections_raw = []
+    all_found_connections_raw = [] # Lista wszystkich znalezionych połączeń (przed deduplikacją)
     processed_count = 0
+    total_targets = len(target_ips_or_hosts)
+
     for ip_or_host in target_ips_or_hosts:
         processed_count += 1
-        print(f"\n--- Odkrywanie dla ({processed_count}/{len(target_ips_or_hosts)}): {ip_or_host} ---")
+        print(f"\n--- Odkrywanie dla ({processed_count}/{total_targets}): {ip_or_host} ---")
+        # Znajdź dane urządzenia w liście pobranej z API
         target_device = find_device_in_list(ip_or_host, all_devices_from_api)
         if not target_device or not target_device.get("device_id"):
-            print(f"  ⚠ Nie znaleziono urządzenia '{ip_or_host}' w LibreNMS (wg IP/Hostname). Pomijam.")
+            print(f"  ⚠ Nie znaleziono urządzenia '{ip_or_host}' w LibreNMS (wg IP/Hostname/sysName). Pomijam.")
             continue
-
-        # *** DODANE LOGOWANIE INFORMACJI O URZĄDZENIU ***
+        # Wyświetl podstawowe informacje o znalezionym urządzeniu
         print(f"  DEBUG [Discovery]: Znaleziono info dla '{ip_or_host}' w API:")
-        pprint.pprint(target_device) # Wydrukuj cały słownik dla pełnego obrazu
-        # *** KONIEC LOGOWANIA ***
+        pprint.pprint({k:v for k,v in target_device.items() if k in ['device_id','hostname','ip','purpose', 'sysName']})
 
-        dev_id = target_device['device_id']
-        dev_host = target_device.get('hostname')
+        dev_id = target_device['device_id'];
+        dev_host = target_device.get('hostname');
         dev_ip = target_device.get('ip')
-        current_host_identifier = dev_host or dev_ip or ip_or_host
-        print(f"  Przetwarzanie jako: {current_host_identifier} (ID: {dev_id})")
+        current_host_identifier_for_lookup = dev_host or dev_ip or ip_or_host
+        print(f"  Przetwarzanie jako: {current_host_identifier_for_lookup} (ID: {dev_id})")
 
-        primary_id_lookup = dev_host or dev_ip
-        secondary_id_lookup = dev_ip if dev_host and dev_ip != dev_host else None
+        # Ustal odpowiednie SNMP community
+        primary_id_lookup = dev_host
+        secondary_id_lookup = dev_ip
         specific_snmp_comm, comm_source = config_loader.get_specific_snmp_community(
-            device_credentials, config["default_snmp_comm"], primary_id_lookup, secondary_id_lookup
+             device_credentials, config["default_snmp_comm"], primary_id_lookup, secondary_id_lookup
         )
-        if specific_snmp_comm and comm_source != "brak": print(f"  Używam SNMP community (źródło: {comm_source})")
-        elif comm_source == "brak": print(f"  ⓘ Brak community SNMP dla tego urządzenia.")
+        if specific_snmp_comm and comm_source != "brak":
+             print(f"  Używam SNMP community (źródło: {comm_source})")
+        elif comm_source == "brak":
+             print(f"  ⓘ Brak community SNMP dla tego urządzenia. Metody SNMP zostaną pominięte.")
 
+        # Zbuduj mapę ifIndex -> Nazwa Portu dla tego konkretnego urządzenia
         idx2name = data_processing.build_ifindex_to_name_map(api_client, str(dev_id))
+        device_connections = [] # Lista połączeń znalezionych dla TEGO urządzenia
 
-        device_connections = []
-        # Wywołania metod discovery
-        if specific_snmp_comm: device_connections.extend(discovery.find_via_lldp_cdp_snmp(target_device, specific_snmp_comm, idx2name))
+        # Uruchom metody odkrywania
+        if specific_snmp_comm:
+            device_connections.extend(discovery.find_via_lldp_cdp_snmp(target_device, specific_snmp_comm, idx2name))
+            device_connections.extend(discovery.find_via_qbridge_snmp(phys_map, target_device, specific_snmp_comm, idx2name))
+            device_connections.extend(discovery.find_via_snmp_fdb(phys_map, target_device, specific_snmp_comm, idx2name))
+            device_connections.extend(discovery.find_via_arp_snmp(phys_map, target_device, specific_snmp_comm, idx2name))
+        # Metoda API
         device_connections.extend(discovery.find_via_api_fdb(api_client, phys_map, target_device))
-        if specific_snmp_comm: device_connections.extend(discovery.find_via_snmp_fdb(phys_map, target_device, specific_snmp_comm, idx2name))
-        if specific_snmp_comm: device_connections.extend(discovery.find_via_qbridge_snmp(phys_map, target_device, specific_snmp_comm, idx2name))
+        # Metoda CLI
         if config["cli_username"] and config["cli_password"]:
              target_for_cli = dev_host or dev_ip
-             if target_for_cli: device_connections.extend(discovery.find_via_cli(target_for_cli, config["cli_username"], config["cli_password"]))
-             else: print("  ⚠ CLI: Brak identyfikatora (hostname/IP) do próby połączenia CLI.")
-        if specific_snmp_comm: device_connections.extend(discovery.find_via_arp_snmp(phys_map, target_device, specific_snmp_comm, idx2name))
+             if target_for_cli:
+                 device_connections.extend(discovery.find_via_cli(target_for_cli, config["cli_username"], config["cli_password"]))
+             else:
+                 print("  ⚠ CLI: Brak identyfikatora (hostname/IP) do próby połączenia CLI.")
 
         if device_connections:
-            print(f"  ✓ Znaleziono {len(device_connections)} potencjalnych połączeń dla {current_host_identifier}.")
+            print(f"  ✓ Znaleziono {len(device_connections)} potencjalnych połączeń dla {current_host_identifier_for_lookup}.")
             all_found_connections_raw.extend(device_connections)
         else:
-            print(f"  ❌ Nie wykryto połączeń dla {current_host_identifier}.")
+            print(f"  ❌ Nie wykryto żadnych połączeń dla {current_host_identifier_for_lookup}.")
 
-    print("\n[Odkrywanie 5/5] Wzbogacanie danych, normalizacja i zapisywanie wyników...")
+    # [Krok 6] Wzbogacanie, deduplikacja i zapis wyników
+    print("\n[Odkrywanie 5/5] Wzbogacanie danych, normalizacja, deduplikacja i zapisywanie wyników...")
     enriched_connections = []
     if all_found_connections_raw:
-        print("  Wzbogacanie danych o połączeniach o dodatkowe identyfikatory...")
+        print("  Wzbogacanie danych o połączeniach o kanoniczne nazwy i dodatkowe identyfikatory...")
+        device_info_by_canonical = {get_canonical_identifier(d): d for d in all_devices_from_api} # Mapa do szybkiego lookupu
+        processed_raw_count = 0
         for conn_raw in all_found_connections_raw:
-            local_original = conn_raw.get('local_host')
-            remote_original = conn_raw.get('neighbor_host')
+            processed_raw_count += 1
+            if processed_raw_count % 50 == 0: print(f"   Wzbogacono {processed_raw_count}/{len(all_found_connections_raw)}...")
 
-            local_info = device_lookup_by_ip.get(local_original)
-            if not local_info and isinstance(local_original, str): local_info = device_lookup_by_hostname_lower.get(local_original.lower())
-            remote_info = device_lookup_by_ip.get(remote_original)
-            if not remote_info and isinstance(remote_original, str): remote_info = device_lookup_by_hostname_lower.get(remote_original.lower())
+            local_original = conn_raw.get('local_host'); remote_original = conn_raw.get('neighbor_host')
+            local_if_raw = conn_raw.get('local_if'); remote_if_raw = conn_raw.get('neighbor_if')
+            via_raw = conn_raw.get('via'); vlan_raw = conn_raw.get('vlan')
 
-            local_canonical = get_canonical_identifier(local_original, local_info)
-            remote_canonical = get_canonical_identifier(remote_original, remote_info)
+            local_info = find_device_in_list(local_original, all_devices_from_api)
+            remote_info = find_device_in_list(remote_original, all_devices_from_api)
 
-            if str(remote_canonical).lower() == 'null': continue
+            local_canonical = get_canonical_identifier(local_info, local_original)
+            remote_canonical = get_canonical_identifier(remote_info, remote_original)
+
+            if str(remote_canonical).lower() == 'null' or remote_canonical is None: continue
+            if local_canonical == remote_canonical: continue
 
             enriched_conn = {
-                "local_device": local_canonical,
-                "local_port": conn_raw.get('local_if'),
-                "remote_device": remote_canonical,
-                "remote_port": conn_raw.get('neighbor_if'),
-                "vlan": conn_raw.get('vlan'),
-                "discovery_method": conn_raw.get('via'),
+                "local_device": local_canonical, "local_port": local_if_raw,
+                "remote_device": remote_canonical, "remote_port": remote_if_raw,
+                "vlan": vlan_raw, "discovery_method": via_raw,
                 "local_device_ip": local_info.get('ip') if local_info else None,
                 "local_device_hostname": local_info.get('hostname') if local_info else None,
+                "local_device_purpose": local_info.get('purpose') if local_info else None,
                 "remote_device_ip": remote_info.get('ip') if remote_info else None,
                 "remote_device_hostname": remote_info.get('hostname') if remote_info else None,
+                "remote_device_purpose": remote_info.get('purpose') if remote_info else None,
                 "remote_device_original": remote_original if not remote_info else None
             }
             enriched_conn = {k: v for k, v in enriched_conn.items() if v is not None}
             enriched_connections.append(enriched_conn)
 
-        print(f"  Zebrano {len(enriched_connections)} wpisów po wzbogaceniu i filtracji 'null'. Deduplikowanie...")
+        print(f"  Zebrano {len(enriched_connections)} wpisów po wzbogaceniu i filtracji. Deduplikowanie...")
         final_connections = data_processing.deduplicate_connections(enriched_connections)
         print(f"  Po deduplikacji: {len(final_connections)} unikalnych połączeń.")
         file_io.save_connections_txt(final_connections, conn_txt_path)
         file_io.save_connections_json(final_connections, conn_json_path)
     else:
-        print("  Nie znaleziono żadnych połączeń w całej sieci.")
+        print("  Nie znaleziono żadnych surowych połączeń.")
+        file_io.save_connections_txt([], conn_txt_path)
+        file_io.save_connections_json([], conn_json_path)
 
     end_time = time.time()
     print(f"=== Zakończono Fazę Odkrywania Połączeń (czas: {end_time - start_time:.2f} sek.) ===")
 
-
-# Funkcja rysująca połączenia (z poprawionym logowaniem)
+# *** Funkcja draw_connections z ULEPSZONYM LOGOWANIEM DIAGNOSTYCZNYM ***
 def draw_connections(global_root: ET.Element, connections_data: list, port_mappings: dict, all_devices_api_list: list):
     """
     Rysuje linie (krawędzie) między portami urządzeń na diagramie.
-    Ulepszono logowanie i wyszukiwanie urządzeń.
+    Zawiera ulepszone logowanie diagnostyczne.
     """
     print("\n  Krok 4d: Rysowanie połączeń między urządzeniami...")
     connection_count = 0
-    drawn_links = set()
-    edge_style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1;endArrow=none;strokeColor=#FF9900;fontSize=8;" # Pomarańczowy
+    drawn_links = set() # Zbiór narysowanych linków (aby uniknąć duplikatów linii)
+    # Styl linii połączeń
+    edge_style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1;endArrow=none;strokeColor=#FF9900;fontSize=8;"
 
     print(f"INFO: Otrzymano {len(connections_data)} połączeń do przetworzenia.")
-    # pprint.pprint(port_mappings) # DEBUG
-
-    missing_devices_logged = set()
-    missing_ports_logged = set()
+    # Zbiory do logowania brakujących elementów tylko raz
+    missing_devices_logged = set(); missing_ports_logged = set()
 
     for i, conn in enumerate(connections_data):
-        local_dev = conn.get("local_device") # Oczekujemy tu kanonicznego ID
-        local_port_name = conn.get("local_port")
-        remote_dev = conn.get("remote_device") # Oczekujemy tu kanonicznego ID
-        remote_port_name = conn.get("remote_port")
-        vlan = conn.get("vlan")
+        # Pobierz dane połączenia (używamy kluczy z JSON)
+        local_dev = conn.get("local_device"); local_port_name = conn.get("local_port")
+        remote_dev = conn.get("remote_device"); remote_port_name = conn.get("remote_port")
+        vlan = conn.get("vlan"); via = conn.get("discovery_method", "?")
 
-        if not all([local_dev, local_port_name, remote_dev, remote_port_name]): continue
+        # Podstawowa walidacja danych połączenia
+        if not all([local_dev, local_port_name, remote_dev, remote_port_name]):
+             print(f"DEBUG: Pomijam niekompletne połączenie #{i}: {conn}")
+             continue
         if str(remote_dev).lower() == 'null' or local_dev == remote_dev: continue
 
+        # --- DIAGNOSTYKA: Wypisz przetwarzane połączenie ---
+        print(f"\nDEBUG [Conn #{i}]: Przetwarzanie {local_dev}:{local_port_name} -> {remote_dev}:{remote_port_name} (via {via})")
+
+        # Znajdź mapowania portów dla urządzenia lokalnego i zdalnego
         local_map = port_mappings.get(local_dev)
         if not local_map and isinstance(local_dev, str): local_map = port_mappings.get(local_dev.lower())
+
         remote_map = port_mappings.get(remote_dev)
         if not remote_map and isinstance(remote_dev, str): remote_map = port_mappings.get(remote_dev.lower())
 
-        source_cell_id = None
-        target_cell_id = None
+        source_cell_id = None; target_cell_id = None # ID komórek portów w Draw.io
 
+        # Sprawdź czy znaleziono mapowania dla obu urządzeń
         if not local_map:
             if local_dev not in missing_devices_logged:
-                 print(f"  INFO: Urządzenie lokalne '{local_dev}' nie znalezione na diagramie (prawdopodobnie spoza ip_list.txt).")
-                 missing_devices_logged.add(local_dev)
+                print(f"  INFO [Conn #{i}]: Urządzenie lokalne '{local_dev}' nie znalezione na diagramie (brak w port_mappings). Połączenie pominięte.")
+                missing_devices_logged.add(local_dev)
             continue
         if not remote_map:
             if remote_dev not in missing_devices_logged:
-                remote_dev_extra_info = ""
-                # Użyj dodatkowych pól z conn, jeśli istnieją
-                ip_info = conn.get("remote_device_ip")
-                host_info = conn.get("remote_device_hostname")
-                orig_info = conn.get("remote_device_original")
-                details = []
-                if host_info and host_info != remote_dev: details.append(f"Hostname={host_info}")
-                if ip_info and ip_info != remote_dev: details.append(f"IP={ip_info}")
-                if orig_info and orig_info != remote_dev: details.append(f"Oryginalny={orig_info}")
-                info_str = f" (Inne ID: {', '.join(details)})" if details else ""
-                # Sprawdźmy, czy JEST na diagramie pod inną nazwą
+                # Sprawdźmy, czy urządzenie zdalne jest gdzieś na diagramie
                 is_on_diagram = False
-                found_dev_info_api = find_device_in_list(remote_dev, all_devices_api_list)
-                if found_dev_info_api:
-                    api_ip = found_dev_info_api.get('ip')
-                    api_host = found_dev_info_api.get('hostname')
-                    if api_ip and api_ip in port_mappings: is_on_diagram = True
-                    if api_host and api_host in port_mappings: is_on_diagram = True
-                    if api_host and api_host.lower() in port_mappings: is_on_diagram = True
-                status_str = "(JEST na diagramie pod inną nazwą/IP!)" if is_on_diagram else "(BRAK go na diagramie)"
-                print(f"  INFO: Urządzenie zdalne '{remote_dev}' nie narysowane (brak klucza '{remote_dev}' w mapowaniu){info_str} - {status_str}.")
+                possible_remote_ids = set(filter(None, [remote_dev, conn.get("remote_device_ip"), conn.get("remote_device_hostname"), conn.get("remote_device_purpose")]))
+                for rem_id in possible_remote_ids:
+                    if rem_id in port_mappings or (isinstance(rem_id, str) and rem_id.lower() in port_mappings):
+                        is_on_diagram = True; break
+                status_str = "JEST na diagramie pod inną nazwą/IP!" if is_on_diagram else "BRAK go na diagramie"
+                print(f"  INFO [Conn #{i}]: Urządzenie zdalne '{remote_dev}' nie znalezione na diagramie (brak klucza w port_mappings). Status: {status_str}. Połączenie pominięte.")
                 missing_devices_logged.add(remote_dev)
             continue
 
-        # Wyszukiwanie portów (nadal może wymagać ulepszeń)
-        lookup_keys_local = [local_port_name]
+        # --- Wyszukiwanie ID komórki portu lokalnego ---
+        lookup_keys_local = [local_port_name] # Zawsze próbuj oryginalną nazwę
         if isinstance(local_port_name, str):
-             if local_port_name.isdigit(): lookup_keys_local.append(local_port_name)
-             if local_port_name.startswith("Eth"): lookup_keys_local.append("Ethernet" + local_port_name[3:])
-        for key in lookup_keys_local:
-             source_cell_id = local_map.get(key)
-             if source_cell_id: break
+            if local_port_name.isdigit(): lookup_keys_local.append(local_port_name)
+            if local_port_name.lower().startswith("gi"): lookup_keys_local.append("GigabitEthernet" + local_port_name[2:])
+            if local_port_name.lower().startswith("fa"): lookup_keys_local.append("FastEthernet" + local_port_name[2:])
+            if local_port_name.lower().startswith("te"): lookup_keys_local.append("TenGigabitEthernet" + local_port_name[2:])
+            if local_port_name.lower().startswith("eth"): lookup_keys_local.append("Ethernet" + local_port_name[3:])
+            # Można dodać więcej normalizacji lub próbę lookupu po ifIndex jeśli będzie dostępny
 
+        # --- DIAGNOSTYKA: Pokaż próby lookupu dla portu lokalnego ---
+        print(f"  DEBUG [Conn #{i}]: Lookup lokalny dla portu '{local_port_name}' w mapie '{local_dev}'. Próbowane klucze: {lookup_keys_local}")
+        print(f"  DEBUG [Conn #{i}]: Dostępne klucze w local_map (max 20): {list(local_map.keys())[:20]}")
+
+        for key in lookup_keys_local:
+            source_cell_id = local_map.get(key)
+            if source_cell_id:
+                print(f"  DEBUG [Conn #{i}]: Znaleziono local port ID: '{source_cell_id}' dla klucza '{key}'")
+                break
+        if not source_cell_id:
+             print(f"  WARN [Conn #{i}]: NIE znaleziono ID komórki dla portu lokalnego '{local_port_name}' na urządzeniu '{local_dev}'.")
+
+        # --- Wyszukiwanie ID komórki portu zdalnego ---
         lookup_keys_remote = [remote_port_name]
         if isinstance(remote_port_name, str):
-             if remote_port_name.isdigit(): lookup_keys_remote.append(remote_port_name)
-             if remote_port_name.startswith("Eth"): lookup_keys_remote.append("Ethernet" + remote_port_name[3:])
-        for key in lookup_keys_remote:
-             target_cell_id = remote_map.get(key)
-             if target_cell_id: break
+            if remote_port_name.isdigit(): lookup_keys_remote.append(remote_port_name)
+            if remote_port_name.lower().startswith("gi"): lookup_keys_remote.append("GigabitEthernet" + remote_port_name[2:])
+            if remote_port_name.lower().startswith("fa"): lookup_keys_remote.append("FastEthernet" + remote_port_name[2:])
+            if remote_port_name.lower().startswith("te"): lookup_keys_remote.append("TenGigabitEthernet" + remote_port_name[2:])
+            if remote_port_name.lower().startswith("eth"): lookup_keys_remote.append("Ethernet" + remote_port_name[3:])
 
+        # --- DIAGNOSTYKA: Pokaż próby lookupu dla portu zdalnego ---
+        print(f"  DEBUG [Conn #{i}]: Lookup zdalny dla portu '{remote_port_name}' w mapie '{remote_dev}'. Próbowane klucze: {lookup_keys_remote}")
+        print(f"  DEBUG [Conn #{i}]: Dostępne klucze w remote_map (max 20): {list(remote_map.keys())[:20]}")
+
+        for key in lookup_keys_remote:
+            target_cell_id = remote_map.get(key)
+            if target_cell_id:
+                 print(f"  DEBUG [Conn #{i}]: Znaleziono remote port ID: '{target_cell_id}' dla klucza '{key}'")
+                 break
+        if not target_cell_id:
+              print(f"  WARN [Conn #{i}]: NIE znaleziono ID komórki dla portu zdalnego '{remote_port_name}' na urządzeniu '{remote_dev}'.")
+
+        # --- Rysowanie krawędzi, jeśli oba porty znaleziono ---
         if source_cell_id and target_cell_id:
             link_key = tuple(sorted((source_cell_id, target_cell_id)))
-            if link_key in drawn_links: continue
+            if link_key in drawn_links:
+                 print(f"  DEBUG [Conn #{i}]: Pomijam duplikat linku między {source_cell_id} a {target_cell_id}")
+                 continue
+
             edge_id = f"conn_edge_{i}_{source_cell_id}_{target_cell_id}"
             edge_label = f"VLAN {vlan}" if vlan is not None else ""
-            edge_cell = drawio_utils.create_edge_cell(
-                edge_id, "1", source_cell_id, target_cell_id, edge_style
-            )
+            edge_cell = drawio_utils.create_edge_cell(edge_id, "1", source_cell_id, target_cell_id, edge_style)
             if edge_label:
-                 edge_cell.set("value", edge_label)
-                 drawio_utils.apply_style_change(edge_cell, "labelBackgroundColor", "#FFFFFF")
-                 drawio_utils.apply_style_change(edge_cell, "fontColor", "#000000")
-            global_root.append(edge_cell)
-            drawn_links.add(link_key)
+                edge_cell.set("value", edge_label)
+                drawio_utils.apply_style_change(edge_cell, "labelBackgroundColor", "#FFFFFF")
+                drawio_utils.apply_style_change(edge_cell, "fontColor", "#000000")
+
+            global_root.append(edge_cell);
+            drawn_links.add(link_key);
             connection_count += 1
+            print(f"  ✓ [Conn #{i}]: Narysowano połączenie między {source_cell_id} a {target_cell_id}")
         else:
-             local_port_key = f"{local_dev}:{local_port_name}"
-             remote_port_key = f"{remote_dev}:{remote_port_name}"
-             if not source_cell_id and local_port_key not in missing_ports_logged:
-                  print(f"  WARN: Nie znaleziono portu '{local_port_name}' na narysowanym urządzeniu '{local_dev}'. Dostępne klucze (max 10): {list(local_map.keys())[:10]}...")
-                  missing_ports_logged.add(local_port_key)
-             if not target_cell_id and remote_port_key not in missing_ports_logged:
-                  print(f"  WARN: Nie znaleziono portu '{remote_port_name}' na narysowanym urządzeniu '{remote_dev}'. Dostępne klucze (max 10): {list(remote_map.keys())[:10]}...")
-                  missing_ports_logged.add(remote_port_key)
+            # Logowanie tylko raz, jeśli nie znaleziono portu
+            local_port_key = f"{local_dev}:{local_port_name}"; remote_port_key = f"{remote_dev}:{remote_port_name}"
+            if not source_cell_id and local_port_key not in missing_ports_logged:
+                # Komunikat przeniesiony do miejsca lookupu
+                missing_ports_logged.add(local_port_key)
+            if not target_cell_id and remote_port_key not in missing_ports_logged:
+                # Komunikat przeniesiony do miejsca lookupu
+                missing_ports_logged.add(remote_port_key)
+            print(f"  INFO [Conn #{i}]: Połączenie między '{local_dev}:{local_port_name}' a '{remote_dev}:{remote_port_name}' NIE zostało narysowane (brak jednego lub obu ID portów).")
 
-    print(f"  ✓ Narysowano {connection_count} połączeń.")
+    print(f"\n  ✓ Zakończono rysowanie połączeń. Narysowano {connection_count} linii.")
 
 
-# Funkcja generująca diagram (zaktualizowana o logikę kanonicznych ID)
+# Funkcja generująca diagram
 def run_diagram_generation(config, api_client, ip_list_path, template_path, output_path, connections_json_path):
     """Wykonuje część aplikacji odpowiedzialną za generowanie diagramu."""
     print("\n=== Rozpoczynanie Fazy Generowania Diagramu ===")
     start_time = time.time()
+    # [Krok 1] Wczytaj listę urządzeń do narysowania
     print(f"[Diagram 1/5] Wczytywanie listy urządzeń z {ip_list_path}...")
     target_ips_or_hosts = file_io.load_ip_list(ip_list_path)
-    if not target_ips_or_hosts: return
+    if not target_ips_or_hosts:
+         print("  Brak urządzeń na liście do narysowania.")
+         return
+    # [Krok 2] Pobierz listę wszystkich urządzeń z API
     print("[Diagram 2/5] Pobieranie listy urządzeń z LibreNMS API...")
-    all_devices_from_api = api_client.get_devices(columns="device_id,hostname,ip,sysName")
-    if not all_devices_from_api: return
+    all_devices_from_api = api_client.get_devices(columns="device_id,hostname,ip,sysName,purpose")
+    if not all_devices_from_api:
+         print("⚠ Nie udało się pobrać listy urządzeń z API.")
+         return
+    # [Krok 3] Inicjalizuj generator XML Draw.io
     print("[Diagram 3/5] Inicjalizacja generatora diagramu Draw.io...")
     generator = drawio_base.DrawioXMLGenerator()
     global_root = generator.get_root_element()
+    # [Krok 4] Przetwarzanie urządzeń
     print("[Diagram 4/5] Przetwarzanie urządzeń i budowanie diagramu...")
     device_details_for_layout = []
     max_template_width, max_template_height = 0, 0
-    port_cell_mappings = {} # Słownik na mapowania portów {KANONICZNY_identyfikator_urz: {port_map}}
+    port_cell_mappings = {} # Globalny słownik mapujący ID urządzeń -> mapę ich portów
 
     processed_count = 0
     print("  Krok 4a: Przygotowanie szablonów i zbieranie informacji...")
-    # Mapa do przechowywania kanonicznego ID dla każdego ip_or_host z listy wejściowej
-    input_to_canonical_map = {}
-
     for ip_or_host in target_ips_or_hosts:
         processed_count += 1
         target_device_info = find_device_in_list(ip_or_host, all_devices_from_api)
         if not target_device_info or not target_device_info.get("device_id"):
-             print(f"  Pomijam '{ip_or_host}' w diagramie (nie znaleziono lub brak ID).")
+            print(f"  Pomijam '{ip_or_host}' w diagramie (nie znaleziono w API lub brak ID).")
+            continue
+        template_cells, t_width, t_height = drawio_device_builder.load_and_prepare_template(template_path, processed_count)
+        if template_cells is None:
+             print(f"  ⚠ Nie udało się załadować/przygotować szablonu dla '{ip_or_host}'. Pomijam.")
              continue
+        canonical_id = get_canonical_identifier(target_device_info, ip_or_host)
+        if not canonical_id: canonical_id = f"unknown_dev_{processed_count}"
 
-        template_cells, t_width, t_height = drawio_device_builder.load_and_prepare_template(
-            template_path, processed_count
-        )
-        if template_cells is None: continue
-
-        # Ustal KANONICZNY identyfikator dla tego urządzenia
-        canonical_id = get_canonical_identifier(ip_or_host, target_device_info)
-        input_to_canonical_map[ip_or_host] = canonical_id # Zapamiętaj mapowanie
-        # print(f"  Urządzenie wejściowe '{ip_or_host}' mapuje na kanoniczny ID: '{canonical_id}'")
+        device_identifiers_to_map = set()
+        dev_ip = target_device_info.get('ip'); dev_host = target_device_info.get('hostname'); dev_purpose = target_device_info.get('purpose')
+        device_identifiers_to_map.add(ip_or_host)
+        if dev_ip: device_identifiers_to_map.add(dev_ip)
+        if dev_host: device_identifiers_to_map.add(dev_host); device_identifiers_to_map.add(dev_host.lower())
+        if dev_purpose: device_identifiers_to_map.add(dev_purpose); device_identifiers_to_map.add(dev_purpose.lower())
+        if canonical_id: device_identifiers_to_map.add(canonical_id); device_identifiers_to_map.add(canonical_id.lower())
+        device_identifiers_to_map = set(filter(None, device_identifiers_to_map))
 
         device_details_for_layout.append({
-            "canonical_id": canonical_id, # Zapisz kanoniczny ID
-            "info": target_device_info,
-            "template_cells": template_cells,
+            "identifiers": list(device_identifiers_to_map), "canonical_id": canonical_id,
+            "info": target_device_info, "template_cells": template_cells,
             "width": t_width, "height": t_height, "index": processed_count
         })
-        max_template_width = max(max_template_width, t_width)
+        max_template_width = max(max_template_width, t_width);
         max_template_height = max(max_template_height, t_height)
 
-    if not device_details_for_layout: return
+    if not device_details_for_layout:
+         print("  Brak urządzeń do umieszczenia na diagramie.")
+         return
 
     print(f"  Krok 4b: Obliczanie layoutu dla {len(device_details_for_layout)} urządzeń...")
-    layout_positions = drawio_layout.calculate_grid_layout(
-        len(device_details_for_layout), max_template_width, max_template_height
-    )
+    layout_positions = drawio_layout.calculate_grid_layout(len(device_details_for_layout), max_template_width, max_template_height)
 
     print("  Krok 4c: Dodawanie urządzeń do diagramu...")
     for i, device_data in enumerate(device_details_for_layout):
         port_map = drawio_device_builder.add_device_to_diagram(
-            global_root,
-            device_data["template_cells"],
-            device_data["width"], device_data["height"],
-            device_data["info"], api_client,
-            layout_positions[i], device_data["index"]
+            global_root, device_data["template_cells"], device_data["width"], device_data["height"],
+            device_data["info"], api_client, layout_positions[i], device_data["index"]
         )
-        # ZAPIS MAPOWANIA POD KANONICZNYM ID
-        if port_map:
-            canonical_id = device_data["canonical_id"]
-            if canonical_id:
-                 port_cell_mappings[canonical_id] = port_map
-                 # Dodaj też inne znane ID jako klucze wskazujące na tę samą mapę
-                 dev_ip = device_data["info"].get('ip')
-                 dev_host = device_data["info"].get('hostname')
-                 if dev_ip and dev_ip != canonical_id: port_cell_mappings[dev_ip] = port_map
-                 if dev_host and dev_host != canonical_id:
-                      port_cell_mappings[dev_host] = port_map
-                      port_cell_mappings[dev_host.lower()] = port_map # Również małe litery
+        if port_map is not None:
+            for identifier in device_data["identifiers"]:
+                if identifier: port_cell_mappings[identifier] = port_map
+        else:
+            canonical_id_for_log = device_data.get("canonical_id", device_data.get("identifiers", ["N/A"])[0])
+            print(f"WARN: Funkcja add_device_to_diagram nie zwróciła mapy portów dla urządzenia {canonical_id_for_log}.")
 
-
-    # Krok rysowania połączeń
-    print("[Diagram 5/5] Rysowanie połączeń...")
+    # [Krok 5] Rysowanie połączeń
+    print("[Diagram 5/5] Rysowanie połączeń na podstawie danych z JSON...")
     connections_data = file_io.load_connections_json(connections_json_path)
     if connections_data:
-         # Przekaż mapowania i PEŁNĄ listę urządzeń z API do funkcji rysującej
-         draw_connections(global_root, connections_data, port_cell_mappings, all_devices_from_api)
+        draw_connections(global_root, connections_data, port_cell_mappings, all_devices_from_api) # Wywołanie funkcji rysującej
     else:
-         print("  Brak danych o połączeniach do narysowania.")
+        print(f"  Brak danych o połączeniach w pliku {connections_json_path} do narysowania.")
 
-    # Zapisz diagram
+    # [Krok 6] Zapisz gotowy diagram
     file_io.save_diagram_xml(generator.get_tree(), output_path)
+
     end_time = time.time()
     print(f"=== Zakończono Fazę Generowania Diagramu (czas: {end_time - start_time:.2f} sek.) ===")
-
 
 # --- Główny blok wykonawczy ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Narzędzie do odkrywania połączeń sieciowych i generowania diagramów Draw.io.")
-    # ... (definicje argumentów bez zmian) ...
     parser.add_argument("--discover", action="store_true", help="Uruchom tylko fazę odkrywania połączeń.")
     parser.add_argument("--diagram", action="store_true", help="Uruchom tylko fazę generowania diagramu.")
     parser.add_argument("--ip-list", default=IP_LIST_FILE, help=f"Ścieżka do pliku z listą IP/Hostname (domyślnie: {IP_LIST_FILE}).")
     parser.add_argument("--creds-json", default=DEVICE_CREDENTIALS_FILE, help=f"Ścieżka do pliku JSON z danymi SNMP (domyślnie: {DEVICE_CREDENTIALS_FILE}).")
     parser.add_argument("--conn-txt", default=CONNECTIONS_TXT_FILE, help=f"Ścieżka do zapisu pliku .txt z połączeniami (domyślnie: {CONNECTIONS_TXT_FILE}).")
-    parser.add_argument("--conn-json", default=CONNECTIONS_JSON_FILE, help=f"Ścieżka do zapisu pliku .json z połączeniami (domyślnie: {CONNECTIONS_JSON_FILE}).")
+    parser.add_argument("--conn-json", default=CONNECTIONS_JSON_FILE, help=f"Ścieżka do zapisu/odczytu pliku .json z połączeniami (domyślnie: {CONNECTIONS_JSON_FILE}).")
     parser.add_argument("--template", default=DIAGRAM_TEMPLATE_FILE, help=f"Ścieżka do pliku szablonu .drawio (domyślnie: {DIAGRAM_TEMPLATE_FILE}).")
     parser.add_argument("--diagram-out", default=DIAGRAM_OUTPUT_FILE, help=f"Ścieżka do zapisu diagramu .drawio (domyślnie: {DIAGRAM_OUTPUT_FILE}).")
     parser.add_argument("--no-verify-ssl", action="store_true", help="Wyłącz weryfikację certyfikatu SSL dla API LibreNMS.")
@@ -420,12 +490,12 @@ if __name__ == "__main__":
 
     if run_diagram_flag:
         if not os.path.exists(args.template):
-             print(f"⚠ Błąd krytyczny: Plik szablonu '{args.template}' nie istnieje. Przerywam generowanie diagramu.")
+            print(f"⚠ Błąd krytyczny: Plik szablonu '{args.template}' nie istnieje. Przerywam generowanie diagramu.")
         elif not os.path.exists(args.conn_json) and not run_discovery_flag:
-             print(f"⚠ Ostrzeżenie: Plik połączeń '{args.conn_json}' nie istnieje (a faza odkrywania nie była uruchomiona). Linie nie zostaną narysowane.")
-             run_diagram_generation(env_config, api, args.ip_list, args.template, args.diagram_out, args.conn_json)
+            print(f"⚠ Ostrzeżenie: Plik połączeń '{args.conn_json}' nie istnieje. Diagram zostanie wygenerowany bez linii połączeń.")
+            run_diagram_generation(env_config, api, args.ip_list, args.template, args.diagram_out, args.conn_json)
         else:
-             run_diagram_generation(env_config, api, args.ip_list, args.template, args.diagram_out, args.conn_json)
+            run_diagram_generation(env_config, api, args.ip_list, args.template, args.diagram_out, args.conn_json)
 
     app_end_time = time.time()
     print(f"\n--- Zakończono działanie aplikacji. Całkowity czas: {app_end_time - app_start_time:.2f} sek. ---")
