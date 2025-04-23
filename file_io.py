@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 DEFAULT_IP_LIST_FILE = "ip_list.txt"
 DEFAULT_CONNECTIONS_TXT_FILE = "connections.txt"
-DEFAULT_CONNECTIONS_JSON_FILE = "connections.json"
+DEFAULT_CONNECTIONS_JSON_FILE = "connections.json" # Domyślna ścieżka do pliku JSON
 DEFAULT_DIAGRAM_FILE = "network_diagram.drawio"
 
 def load_ip_list(filepath=DEFAULT_IP_LIST_FILE):
@@ -27,15 +27,7 @@ def save_connections_txt(connections, filepath=DEFAULT_CONNECTIONS_TXT_FILE):
     """Zapisuje znalezione połączenia do pliku tekstowego."""
     if not connections:
         print(f"ⓘ Brak połączeń do zapisania w {filepath}.")
-        # Utwórz pusty plik lub nie rób nic? Zdecydowano się nie tworzyć.
-        # Można też utworzyć plik z samym nagłówkiem:
-        # try:
-        #     with open(filepath, "w", encoding="utf-8") as f:
-        #         f.write("# Wygenerowana mapa połączeń sieciowych - brak wyników\n")
-        # except Exception as e:
-        #     print(f"⚠ Błąd zapisu pustego pliku tekstowego {filepath}: {e}")
         return False
-
     try:
         sorted_conns = sorted(connections, key=lambda x: (x.get('local_host',''), x.get('local_if','')))
         with open(filepath, "w", encoding="utf-8") as f:
@@ -56,14 +48,7 @@ def save_connections_json(connections, filepath=DEFAULT_CONNECTIONS_JSON_FILE):
     """Zapisuje znalezione połączenia do pliku JSON."""
     if not connections:
         print(f"ⓘ Brak połączeń do zapisania w {filepath}.")
-        # Można zapisać pustą listę:
-        # try:
-        #     with open(filepath, "w", encoding="utf-8") as f:
-        #         json.dump([], f)
-        # except Exception as e:
-        #     print(f"⚠ Błąd zapisu pustego pliku JSON {filepath}: {e}")
         return False
-
     try:
         sorted_conns = sorted(connections, key=lambda x: (x.get('local_host',''), x.get('local_if','')))
         json_data = []
@@ -84,23 +69,42 @@ def save_connections_json(connections, filepath=DEFAULT_CONNECTIONS_JSON_FILE):
         print(f"⚠ Błąd zapisu do pliku JSON {filepath}: {e}")
         return False
 
+# *** NOWA FUNKCJA ***
+def load_connections_json(filepath=DEFAULT_CONNECTIONS_JSON_FILE):
+    """Wczytuje dane o połączeniach z pliku JSON."""
+    if not os.path.exists(filepath):
+        print(f"⚠ Plik połączeń JSON '{filepath}' nie istnieje.")
+        return [] # Zwróć pustą listę, jeśli plik nie istnieje
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            connections = json.load(f)
+            # Podstawowa walidacja - sprawdź czy to lista
+            if isinstance(connections, list):
+                 print(f"✓ Wczytano {len(connections)} połączeń z {filepath}.")
+                 return connections
+            else:
+                 print(f"⚠ Nieprawidłowy format danych w {filepath} - oczekiwano listy.")
+                 return []
+    except json.JSONDecodeError as e:
+        print(f"⚠ Błąd parsowania pliku JSON z połączeniami {filepath}: {e}")
+        return []
+    except Exception as e:
+        print(f"⚠ Błąd odczytu pliku JSON z połączeniami {filepath}: {e}")
+        return []
+
 def save_diagram_xml(xml_tree: ET.ElementTree, filepath=DEFAULT_DIAGRAM_FILE):
      """Zapisuje drzewo XML diagramu Draw.io do pliku."""
      if xml_tree is None:
          print("⚠ Próba zapisu pustego drzewa XML diagramu.")
          return False
      try:
-         # Formatowanie XML dla czytelności (Python 3.9+)
          try:
              ET.indent(xml_tree, space="  ", level=0)
          except AttributeError:
-             # print("ⓘ Brak ET.indent (Python < 3.9), XML nie będzie sformatowany.")
              pass
-
          xml_string = ET.tostring(xml_tree.getroot(), encoding="utf-8", method="xml").decode("utf-8")
          if not xml_string.startswith('<?xml'):
               xml_string = '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_string
-
          with open(filepath, "w", encoding="utf-8") as f:
              f.write(xml_string)
          print(f"✓ Diagram Draw.io zapisany jako {filepath}")

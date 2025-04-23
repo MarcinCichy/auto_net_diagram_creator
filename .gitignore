@@ -7,3 +7,6 @@ device_credentials.json
 connections.json
 connections.txt
 *.log
+/old_ver
+app_all_diagram.txt
+application_digram.txt
