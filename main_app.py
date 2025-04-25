@@ -10,14 +10,14 @@ import xml.etree.ElementTree as ET
 import re
 
 # --- Importy z naszych modułów ---
-import config_loader # Zmodyfikowany
+import config_loader # Wersja bez creds file
 import file_io
 from librenms_client import LibreNMSAPI
 import data_processing
-import discovery # Zmodyfikowany
+import discovery # Wersja z iteracją po community
 import drawio_base
 import drawio_layout
-import drawio_device_builder
+import drawio_device_builder # Wersja z dummy endpoints
 import drawio_utils
 
 # --- Stałe ---
@@ -25,7 +25,7 @@ IP_LIST_FILE = "ip_list.txt"
 # Usunięto stałą DEVICE_CREDENTIALS_FILE
 CONNECTIONS_TXT_FILE = "connections.txt"
 CONNECTIONS_JSON_FILE = "connections.json"
-DIAGRAM_TEMPLATE_FILE = "switch.drawio"
+DIAGRAM_TEMPLATE_FILE = "switch.drawio" # Upewnij się, że używasz szablonu z 52+mgmt portami
 DIAGRAM_OUTPUT_FILE = "network_diagram.drawio"
 
 # --- Funkcje pomocnicze ---
@@ -98,7 +98,7 @@ def run_discovery(config, api_client, ip_list_path, conn_txt_path, conn_json_pat
 
         # *** ZMIANA: Pobierz listę community z konfiguracji ***
         communities = config_loader.get_communities_to_try(
-            config["default_snmp_communities"] # Przekaż listę domyślną
+            config["default_snmp_communities"] # Przekaż tylko listę domyślną
         )
         # ******************************************************
 
@@ -202,7 +202,7 @@ def draw_connections(global_root: ET.Element, connections_data: list, port_mappi
     print("\n  Krok 4d: Rysowanie połączeń między urządzeniami...")
     connection_count = 0
     drawn_links = set()
-    edge_style_base = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=240;html=1;strokeWidth=1.5;endArrow=none;strokeColor=#FF9900;fontSize=8;"
+    edge_style_base = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=120;html=1;strokeWidth=1.5;endArrow=none;strokeColor=#FF9900;fontSize=8;"
     print(f"INFO: Otrzymano {len(connections_data)} połączeń do przetworzenia.")
     missing_devices_logged = set(); missing_ports_logged = set()
     for i, conn in enumerate(connections_data):
