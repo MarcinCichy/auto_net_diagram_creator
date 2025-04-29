@@ -7,7 +7,7 @@ from librenms_client import LibreNMSAPI
 import drawio_utils
 import copy
 
-# Stałe (bez zmian)
+# Stałe
 LINE_LENGTH = 25
 LABEL_OFFSET_X = 5
 MARGIN_BETWEEN_LINE_AND_LABEL = 15
@@ -19,6 +19,8 @@ VERTICAL_OFFSET_FROM_GROUP_TOP = 0
 INFO_LABEL_X_OFFSET = -150
 INFO_LABEL_MIN_WIDTH = 200
 LOGICAL_IF_LIST_MAX_HEIGHT = 150
+# NOWA STAŁA - odległość pierwszego/ostatniego waypointu od punktu końcowego
+WAYPOINT_OFFSET = 20
 
 
 # Funkcja load_and_prepare_template (bez zmian)
@@ -34,13 +36,13 @@ def load_and_prepare_template(template_path, device_index):
     original_cells = list(template_root)
     temp_root_for_processing = ET.Element("root")
     for cell in original_cells:
-         temp_root_for_processing.append(copy.deepcopy(cell))
+            temp_root_for_processing.append(copy.deepcopy(cell))
     id_suffix = f"dev{device_index}"
     drawio_utils.reassign_cell_ids(temp_root_for_processing, id_suffix)
     bbox = drawio_utils.get_bounding_box(temp_root_for_processing)
     if bbox is None:
-         print(f"  ⚠ Nie można obliczyć wymiarów szablonu (bbox is None): {template_path}")
-         return None, 0, 0
+            print(f"  ⚠ Nie można obliczyć wymiarów szablonu (bbox is None): {template_path}")
+            return None, 0, 0
     min_x, min_y, width, height = bbox
     if width <= 0 or height <= 0:
         print(f"  ⚠ Ostrzeżenie: Obliczone wymiary szablonu są nieprawidłowe ({width}x{height}).")
@@ -52,19 +54,19 @@ def load_and_prepare_template(template_path, device_index):
     return template_cells, width, height
 
 
-# Funkcja add_device_to_diagram (poprawione rysowanie linii pomocniczych)
+# Funkcja add_device_to_diagram (ZMIENIONO ZWRACANĄ MAPĘ)
 def add_device_to_diagram(global_root_cell: ET.Element,
-                          template_cells: list[ET.Element],
-                          template_width: float,
-                          template_height: float,
-                          device_info: dict,
-                          api_client: LibreNMSAPI,
-                          position: tuple[float, float],
-                          device_index: int) -> dict:
+                            template_cells: list[ET.Element],
+                            template_width: float,
+                            template_height: float,
+                            device_info: dict,
+                            api_client: LibreNMSAPI,
+                            position: tuple[float, float],
+                            device_index: int) -> dict:
     """
     Dodaje urządzenie do diagramu, klasyfikując interfejsy.
-    Zwraca mapowanie portów fizycznych na ID punktów końcowych.
-    *** POPRAWIONO RYSOANIE LINII POMOCNICZYCH ALIASÓW ***
+    Zwraca mapowanie portów fizycznych na słownik zawierający:
+    { 'cell_id': ID punktu końcowego, 'x': x_coord, 'y': y_coord, 'orientation': 'up'/'down'/'left'/'right' }
     """
     port_map_for_device = {}
     if not template_cells or global_root_cell is None: return port_map_for_device
@@ -75,7 +77,8 @@ def add_device_to_diagram(global_root_cell: ET.Element,
     current_host_identifier = device_info.get('purpose') or device_info.get('hostname') or device_info.get('ip', f"ID:{device_info.get('device_id')}")
     print(f"  Dodawanie urządzenia {current_host_identifier}...")
 
-    # === Sekcje 1-4 bez zmian ===
+    # === Sekcje 1-4 bez zmian (Grupa, Komórki szablonu, Porty API, Klasyfikacja) ===
+    # (Kod dla sekcji 1-4 pominięty dla zwięzłości - jest taki sam jak poprzednio)
     # 1. Grupa
     group_cell = drawio_utils.create_group_cell(group_id, "1", offset_x, offset_y, template_width, template_height)
     global_root_cell.append(group_cell)
@@ -117,8 +120,10 @@ def add_device_to_diagram(global_root_cell: ET.Element,
         if is_physical: physical_ports_from_api.append(port_info)
         else: port_info['_ifType_iana'] = if_type_iana; logical_interfaces.append(port_info)
     print(f"  Sklasyfikowano: {len(physical_ports_from_api)} portów fizycznych, {len(logical_interfaces)} innych interfejsów.")
+    # --- Koniec sekcji 1-4 ---
 
-    # === Sekcja 5: Przetwarzanie portów fizycznych (ZMIANA: Przywrócenie logiki linii pomocniczych) ===
+
+    # === Sekcja 5: Przetwarzanie portów fizycznych ===
     numeric_port_cells = []
     mgmt0_cell_from_template = None
     for cell in all_port_cells_in_template:
@@ -148,35 +153,46 @@ def add_device_to_diagram(global_root_cell: ET.Element,
         # Obliczanie pozycji linii pomocniczej i punktu końcowego
         port_geom = port_cell.find("./mxGeometry");
         if port_geom is None: continue
+        endpoint_orientation = "unknown" # Zmienna na orientację
         try:
             px = float(port_geom.get("x", 0)) + float(port_geom.get("width", DEFAULT_PORT_WIDTH)) / 2
             py = float(port_geom.get("y", 0)); ph = float(port_geom.get("height", DEFAULT_PORT_HEIGHT))
             port_number = int(port_cell.get("value", "0").strip())
-            if port_number % 2 != 0: line_start_y, line_end_y = py, py - LINE_LENGTH # Góra
-            else: line_start_y, line_end_y = py + ph, py + ph + LINE_LENGTH # Dół
+            if port_number % 2 != 0:
+                line_start_y, line_end_y = py, py - LINE_LENGTH # Góra
+                endpoint_orientation = "up"
+            else:
+                line_start_y, line_end_y = py + ph, py + ph + LINE_LENGTH # Dół
+                endpoint_orientation = "down"
             endpoint_abs_x = offset_x + px
             endpoint_abs_y = offset_y + line_end_y
         except (ValueError, TypeError): continue
 
-        # *** Utwórz niewidoczny punkt końcowy (nadal potrzebny do mapowania) ***
+        # *** Utwórz niewidoczny punkt końcowy (rozmiar bez zmian, bo to nie on był problemem) ***
         dummy_endpoint_id = f"ep_{port_cell_id}"
         dummy_style = "shape=none;fillColor=none;strokeColor=none;resizable=0;movable=0;editable=0;"
         dummy_vertex_cell = drawio_utils.create_label_cell(dummy_endpoint_id, "1", "", endpoint_abs_x - 0.5, endpoint_abs_y - 0.5, 1, 1, dummy_style)
         global_root_cell.append(dummy_vertex_cell)
         # ********************************************************************
 
-        # --- Zapisz mapowanie na ID PUNKTU KOŃCOWEGO ---
+        # --- ZMIANA: Zapisz mapowanie z dodatkowymi informacjami ---
+        endpoint_data = {
+            "cell_id": dummy_endpoint_id,
+            "x": endpoint_abs_x,
+            "y": endpoint_abs_y,
+            "orientation": endpoint_orientation
+        }
         port_name_api = api_port_info.get('ifName');
-        if port_name_api: port_map_for_device[port_name_api] = dummy_endpoint_id
+        if port_name_api: port_map_for_device[port_name_api] = endpoint_data
         port_ifindex_api = api_port_info.get('ifIndex');
-        if port_ifindex_api is not None: port_map_for_device[f"ifindex_{port_ifindex_api}"] = dummy_endpoint_id
+        if port_ifindex_api is not None: port_map_for_device[f"ifindex_{port_ifindex_api}"] = endpoint_data
         port_value_template = port_cell.get("value", "").strip();
-        if port_value_template.isdigit(): port_map_for_device[port_value_template] = dummy_endpoint_id
+        if port_value_template.isdigit(): port_map_for_device[port_value_template] = endpoint_data
         port_descr_api = api_port_info.get('ifDescr');
-        if port_descr_api: port_map_for_device[port_descr_api] = dummy_endpoint_id
-        # -----------------------------------------------
+        if port_descr_api: port_map_for_device[port_descr_api] = endpoint_data
+        # ----------------------------------------------------------
 
-        # *** ZMIANA: Rysowanie linii pomocniczej i etykiety aliasu ***
+        # *** Rysowanie linii pomocniczej i etykiety aliasu (bez zmian) ***
         edge_id = f"edge_{port_cell_id}"; edge_style = "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#AAAAAA;"
         label_text = api_port_info.get("ifAlias", "")
         target_id_for_aux_line = dummy_endpoint_id # Domyślnie cel to punkt końcowy
@@ -194,19 +210,17 @@ def add_device_to_diagram(global_root_cell: ET.Element,
             target_id_for_aux_line = label_id # Jeśli jest etykieta, linia pomocnicza wskazuje na nią
 
         # Rysuj linię pomocniczą od portu do etykiety (lub punktu, jeśli brak etykiety)
-        # Używamy punktów absolutnych dla linii pomocniczej, aby uniknąć problemów z Draw.io
         abs_line_start_y = offset_y + line_start_y
         edge_cell = drawio_utils.create_edge_cell(edge_id, "1", "", "", edge_style)
         edge_geom = edge_cell.find("./mxGeometry")
         ET.SubElement(edge_geom, "mxPoint", {"as": "sourcePoint", "x": str(endpoint_abs_x), "y": str(abs_line_start_y)})
         ET.SubElement(edge_geom, "mxPoint", {"as": "targetPoint", "x": str(endpoint_abs_x), "y": str(endpoint_abs_y)})
-        # Ustaw cel linii na etykietę lub punkt końcowy
         edge_cell.set("source", port_cell_id) # Źródłem jest port
         edge_cell.set("target", target_id_for_aux_line) # Celem jest etykieta lub punkt
         global_root_cell.append(edge_cell)
         # ***********************************************************
 
-    # Przetwarzanie portu mgmt0 (ZMIANA: Przywrócenie logiki linii pomocniczej)
+    # Przetwarzanie portu mgmt0
     if mgmt0_cell_from_template:
         mgmt0_cell_id = mgmt0_cell_from_template.get("id")
         mgmt0_api_info = None
@@ -219,13 +233,17 @@ def add_device_to_diagram(global_root_cell: ET.Element,
             status = mgmt0_api_info.get("ifOperStatus", "unknown").lower(); color = "#00FF00" if status == "up" else ("#FF0000" if status == "down" else "#FFA500")
             drawio_utils.apply_style_change(mgmt0_cell_from_template, "fillColor", color)
             mgmt0_geom = mgmt0_cell_from_template.find("./mxGeometry")
+            endpoint_orientation_mgmt = "unknown" # Orientacja dla mgmt0
             if mgmt0_geom:
                 try:
                     px = float(mgmt0_geom.get("x", 0)) + float(mgmt0_geom.get("width", DEFAULT_PORT_WIDTH))
                     py = float(mgmt0_geom.get("y", 0)) + float(mgmt0_geom.get("height", DEFAULT_PORT_HEIGHT)) / 2
                     endpoint_abs_x = offset_x + px + LINE_LENGTH
                     endpoint_abs_y = offset_y + py
-                except (ValueError, TypeError): endpoint_abs_x, endpoint_abs_y = offset_x + template_width + 50, offset_y + template_height/2
+                    endpoint_orientation_mgmt = "right" # Zakładamy, że mgmt0 wychodzi w prawo
+                except (ValueError, TypeError):
+                    endpoint_abs_x, endpoint_abs_y = offset_x + template_width + 50, offset_y + template_height/2
+                    endpoint_orientation_mgmt = "right" # Domyślnie w prawo
 
                 # Utwórz niewidoczny punkt końcowy dla mgmt0
                 dummy_endpoint_id_mgmt = f"ep_{mgmt0_cell_id}"
@@ -233,17 +251,24 @@ def add_device_to_diagram(global_root_cell: ET.Element,
                 dummy_vertex_cell_mgmt = drawio_utils.create_label_cell(dummy_endpoint_id_mgmt, "1", "", endpoint_abs_x - 0.5, endpoint_abs_y - 0.5, 1, 1, dummy_style_mgmt)
                 global_root_cell.append(dummy_vertex_cell_mgmt)
 
-                # Zapisz mapowanie na ID PUNKTU KOŃCOWEGO
+                # --- ZMIANA: Zapisz mapowanie z dodatkowymi informacjami dla mgmt0 ---
+                endpoint_data_mgmt = {
+                    "cell_id": dummy_endpoint_id_mgmt,
+                    "x": endpoint_abs_x,
+                    "y": endpoint_abs_y,
+                    "orientation": endpoint_orientation_mgmt
+                }
                 port_name_api = mgmt0_api_info.get('ifName');
-                if port_name_api: port_map_for_device[port_name_api] = dummy_endpoint_id_mgmt
+                if port_name_api: port_map_for_device[port_name_api] = endpoint_data_mgmt
                 port_ifindex_api = mgmt0_api_info.get('ifIndex');
-                if port_ifindex_api is not None: port_map_for_device[f"ifindex_{port_ifindex_api}"] = dummy_endpoint_id_mgmt
+                if port_ifindex_api is not None: port_map_for_device[f"ifindex_{port_ifindex_api}"] = endpoint_data_mgmt
                 port_descr_api = mgmt0_api_info.get('ifDescr');
-                if port_descr_api: port_map_for_device[port_descr_api] = dummy_endpoint_id_mgmt
-                port_map_for_device["mgmt0"] = dummy_endpoint_id_mgmt
+                if port_descr_api: port_map_for_device[port_descr_api] = endpoint_data_mgmt
+                port_map_for_device["mgmt0"] = endpoint_data_mgmt
                 print(f"  ✓ Zmapowano port mgmt0 na punkt końcowy (cell ID: {dummy_endpoint_id_mgmt}).")
+                # -----------------------------------------------------------------
 
-                # *** ZMIANA: Rysowanie linii pomocniczej i aliasu dla mgmt0 ***
+                # *** Rysowanie linii pomocniczej i aliasu dla mgmt0 (bez zmian) ***
                 edge_id_mgmt = f"edge_{mgmt0_cell_id}"; edge_style_mgmt = "edgeStyle=orthogonalEdgeStyle;endArrow=none;strokeWidth=1;strokeColor=#AAAAAA;"
                 label_text = mgmt0_api_info.get("ifAlias", "")
                 target_id_for_mgmt_aux = dummy_endpoint_id_mgmt # Domyślnie punkt
@@ -271,6 +296,7 @@ def add_device_to_diagram(global_root_cell: ET.Element,
         else: print(f"  Ostrzeżenie: Znaleziono komórkę 'mgmt0' w szablonie, ale nie znaleziono portu w danych API.")
 
     # === SEKCJA 7: ETYKIETA INFORMACYJNA URZĄDZENIA (bez zmian) ===
+    # (Kod dla sekcji 7 pominięty dla zwięzłości - jest taki sam jak poprzednio)
     dev_info_id = f"device_info_{group_id_suffix}"
     dev_id_val = device_info.get('device_id', 'N/A'); hostname_raw = device_info.get('hostname', ''); ip_raw = device_info.get('ip', ''); purpose_raw = device_info.get('purpose', '')
     temp_display_ip = ip_raw if ip_raw else 'N/A'; hostname_looks_like_ip = bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', str(hostname_raw)))
@@ -308,6 +334,8 @@ def add_device_to_diagram(global_root_cell: ET.Element,
     label_abs_x_pos = offset_x + INFO_LABEL_X_OFFSET; label_abs_y_pos = offset_y + VERTICAL_OFFSET_FROM_GROUP_TOP; label_parent_id = "1"
     dev_info_cell = drawio_utils.create_label_cell(dev_info_id, label_parent_id, full_device_label_html, label_abs_x_pos, label_abs_y_pos, info_width, info_height, dev_info_style)
     global_root_cell.append(dev_info_cell)
+    # --- Koniec sekcji 7 ---
+
 
     print(f"  ✓ Urządzenie {current_host_identifier} przetworzone.")
-    return port_map_for_device
+    return port_map_for_device # Zwracamy teraz słownik ze słownikami
