@@ -77,8 +77,7 @@ def add_device_to_diagram(global_root_cell: ET.Element,
     current_host_identifier = device_info.get('purpose') or device_info.get('hostname') or device_info.get('ip', f"ID:{device_info.get('device_id')}")
     print(f"  Dodawanie urządzenia {current_host_identifier}...")
 
-    # === Sekcje 1-4 bez zmian (Grupa, Komórki szablonu, Porty API, Klasyfikacja) ===
-    # (Kod dla sekcji 1-4 pominięty dla zwięzłości - jest taki sam jak poprzednio)
+    # === Sekcje 1-4 (Grupa, Komórki szablonu, Porty API, Klasyfikacja) ===
     # 1. Grupa
     group_cell = drawio_utils.create_group_cell(group_id, "1", offset_x, offset_y, template_width, template_height)
     global_root_cell.append(group_cell)
@@ -121,7 +120,6 @@ def add_device_to_diagram(global_root_cell: ET.Element,
         else: port_info['_ifType_iana'] = if_type_iana; logical_interfaces.append(port_info)
     print(f"  Sklasyfikowano: {len(physical_ports_from_api)} portów fizycznych, {len(logical_interfaces)} innych interfejsów.")
     # --- Koniec sekcji 1-4 ---
-
 
     # === Sekcja 5: Przetwarzanie portów fizycznych ===
     numeric_port_cells = []
@@ -168,12 +166,16 @@ def add_device_to_diagram(global_root_cell: ET.Element,
             endpoint_abs_y = offset_y + line_end_y
         except (ValueError, TypeError): continue
 
-        # *** Utwórz niewidoczny punkt końcowy (rozmiar bez zmian, bo to nie on był problemem) ***
+        # *** Utwórz niewidoczny punkt końcowy (rozmiar 1x1) ***
         dummy_endpoint_id = f"ep_{port_cell_id}"
         dummy_style = "shape=none;fillColor=none;strokeColor=none;resizable=0;movable=0;editable=0;"
-        dummy_vertex_cell = drawio_utils.create_label_cell(dummy_endpoint_id, "1", "", endpoint_abs_x - 0.5, endpoint_abs_y - 0.5, 1, 1, dummy_style)
+        dummy_vertex_cell = drawio_utils.create_label_cell(
+            dummy_endpoint_id, "1", "",
+            endpoint_abs_x - 0.5, endpoint_abs_y - 0.5, 1, 1, # Pozycja i rozmiar 1x1
+            dummy_style
+        )
         global_root_cell.append(dummy_vertex_cell)
-        # ********************************************************************
+        # ***********************************************************
 
         # --- ZMIANA: Zapisz mapowanie z dodatkowymi informacjami ---
         endpoint_data = {
@@ -245,10 +247,14 @@ def add_device_to_diagram(global_root_cell: ET.Element,
                     endpoint_abs_x, endpoint_abs_y = offset_x + template_width + 50, offset_y + template_height/2
                     endpoint_orientation_mgmt = "right" # Domyślnie w prawo
 
-                # Utwórz niewidoczny punkt końcowy dla mgmt0
+                # Utwórz niewidoczny punkt końcowy dla mgmt0 (rozmiar 1x1)
                 dummy_endpoint_id_mgmt = f"ep_{mgmt0_cell_id}"
                 dummy_style_mgmt = "shape=none;fillColor=none;strokeColor=none;resizable=0;movable=0;editable=0;"
-                dummy_vertex_cell_mgmt = drawio_utils.create_label_cell(dummy_endpoint_id_mgmt, "1", "", endpoint_abs_x - 0.5, endpoint_abs_y - 0.5, 1, 1, dummy_style_mgmt)
+                dummy_vertex_cell_mgmt = drawio_utils.create_label_cell(
+                    dummy_endpoint_id_mgmt, "1", "",
+                    endpoint_abs_x - 0.5, endpoint_abs_y - 0.5, 1, 1, # Pozycja i rozmiar 1x1
+                    dummy_style_mgmt
+                )
                 global_root_cell.append(dummy_vertex_cell_mgmt)
 
                 # --- ZMIANA: Zapisz mapowanie z dodatkowymi informacjami dla mgmt0 ---
@@ -296,7 +302,6 @@ def add_device_to_diagram(global_root_cell: ET.Element,
         else: print(f"  Ostrzeżenie: Znaleziono komórkę 'mgmt0' w szablonie, ale nie znaleziono portu w danych API.")
 
     # === SEKCJA 7: ETYKIETA INFORMACYJNA URZĄDZENIA (bez zmian) ===
-    # (Kod dla sekcji 7 pominięty dla zwięzłości - jest taki sam jak poprzednio)
     dev_info_id = f"device_info_{group_id_suffix}"
     dev_id_val = device_info.get('device_id', 'N/A'); hostname_raw = device_info.get('hostname', ''); ip_raw = device_info.get('ip', ''); purpose_raw = device_info.get('purpose', '')
     temp_display_ip = ip_raw if ip_raw else 'N/A'; hostname_looks_like_ip = bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', str(hostname_raw)))
@@ -335,7 +340,6 @@ def add_device_to_diagram(global_root_cell: ET.Element,
     dev_info_cell = drawio_utils.create_label_cell(dev_info_id, label_parent_id, full_device_label_html, label_abs_x_pos, label_abs_y_pos, info_width, info_height, dev_info_style)
     global_root_cell.append(dev_info_cell)
     # --- Koniec sekcji 7 ---
-
 
     print(f"  ✓ Urządzenie {current_host_identifier} przetworzone.")
     return port_map_for_device # Zwracamy teraz słownik ze słownikami

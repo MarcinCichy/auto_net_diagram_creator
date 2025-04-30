@@ -21,15 +21,10 @@ def load_drawio_template(filepath=DEFAULT_TEMPLATE_FILE) -> ET.ElementTree | Non
         return None
 
 def find_cells(root_element: ET.Element, tag_name="mxCell") -> list[ET.Element]:
-     """Znajduje wszystkie komórki o danym tagu (domyślnie mxCell) w obrębie elementu."""
-     if root_element is None: return []
-      # Używamy findall('.') aby szukać tylko bezpośrednich dzieci z tagiem mxCell
-      # To założenie może być błędne jeśli struktura szablonu jest zagnieżdżona inaczej
-      # Bezpieczniej jest użyć findall('.//mxCell') ale może złapać za dużo? Testowo zostawiam findall('.')
-     # return root_element.findall(f"./{tag_name}")
-     # Poprawka: Szukaj rekursywnie, bo reassign_ids też tak robiło
-     return root_element.findall(f".//{tag_name}")
-
+    """Znajduje wszystkie komórki o danym tagu (domyślnie mxCell) w obrębie elementu."""
+    if root_element is None: return []
+    # Szukaj rekursywnie
+    return root_element.findall(f".//{tag_name}")
 
 def find_cells_by_value(root_element: ET.Element, criteria_func) -> list[ET.Element]:
     """
@@ -38,21 +33,20 @@ def find_cells_by_value(root_element: ET.Element, criteria_func) -> list[ET.Elem
     """
     if root_element is None: return []
     matching_cells = []
-    # Ważne: szukamy w całym drzewie pod root_element
     for cell in find_cells(root_element): # Używa find_cells, które szuka rekursywnie
         value = cell.get("value", "").strip()
         try:
-             if criteria_func(value):
-                 matching_cells.append(cell)
+            if criteria_func(value):
+                matching_cells.append(cell)
         except Exception:
-             pass
+            pass
     return matching_cells
 
 def find_cell_by_id(root_element: ET.Element, cell_id: str) -> ET.Element | None:
-     """Znajduje komórkę o podanym ID w obrębie elementu (rekursywnie)."""
-     if root_element is None or not cell_id: return None
-     # Poprawiony XPath - szukaj rekursywnie w całym poddrzewie
-     return root_element.find(f".//mxCell[@id='{cell_id}']")
+    """Znajduje komórkę o podanym ID w obrębie elementu (rekursywnie)."""
+    if root_element is None or not cell_id: return None
+    # Szukaj rekursywnie w całym poddrzewie
+    return root_element.find(f".//mxCell[@id='{cell_id}']")
 
 def reassign_cell_ids(root_element: ET.Element, suffix: str):
     """
@@ -67,21 +61,19 @@ def reassign_cell_ids(root_element: ET.Element, suffix: str):
     for cell in cells_to_process:
         old_id = cell.get("id")
         if old_id:
-            # Unikaj ponownego dodawania sufiksu, jeśli już istnieje (mało prawdopodobne, ale bezpieczne)
+            # Unikaj ponownego dodawania sufiksu
             if not old_id.endswith(f"_{suffix}"):
-                 new_id = f"{old_id}_{suffix}"
-                 id_map[old_id] = new_id
+                new_id = f"{old_id}_{suffix}"
+                id_map[old_id] = new_id
             else:
-                 id_map[old_id] = old_id # Jeśli już ma sufiks, mapuj na siebie
+                id_map[old_id] = old_id
 
     # 2. Zaktualizuj atrybuty id, parent, source, target
     for cell in cells_to_process:
         old_id = cell.get("id")
-        # Zaktualizuj ID komórki, jeśli jest w mapie i nie jest to ID z sufiksem już przypisane
         if old_id in id_map and cell.get("id") == old_id:
             cell.set("id", id_map[old_id])
 
-        # Zaktualizuj referencje używając mapy
         old_parent = cell.get("parent")
         if old_parent and old_parent in id_map:
             cell.set("parent", id_map[old_parent])
@@ -100,20 +92,18 @@ def get_bounding_box(element: ET.Element) -> tuple[float, float, float, float]:
     max_x, max_y = float('-inf'), float('-inf')
     has_geometry = False
 
-    # Iteruj tylko po bezpośrednich dzieciach, które mają geometrię
     for cell in element.findall("./mxCell"): # Szukamy tylko w bezpośrednich dzieciach?
         geom = cell.find("./mxGeometry")
         if geom is not None:
             try:
                 x = float(geom.get("x", 0))
                 y = float(geom.get("y", 0))
-                # Używamy wymiarów tylko jeśli są > 0, inaczej traktujemy jako punkt
                 w = float(geom.get("width", 0))
                 h = float(geom.get("height", 0))
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
-                max_x = max(max_x, x + w if w > 0 else x) # Uwzględnij szerokość
-                max_y = max(max_y, y + h if h > 0 else y) # Uwzględnij wysokość
+                max_x = max(max_x, x + w if w > 0 else x)
+                max_y = max(max_y, y + h if h > 0 else y)
                 has_geometry = True
             except (ValueError, TypeError):
                 continue
@@ -121,11 +111,8 @@ def get_bounding_box(element: ET.Element) -> tuple[float, float, float, float]:
     if not has_geometry:
         return 0, 0, 0, 0
 
-    # Zwróć wymiary tylko jeśli są dodatnie
     width = max_x - min_x if max_x > min_x else 0
     height = max_y - min_y if max_y > min_y else 0
-
-    # Upewnij się, że min_x, min_y nie pozostały nieskończonościami
     final_min_x = min_x if min_x != float('inf') else 0
     final_min_y = min_y if min_y != float('inf') else 0
 
@@ -139,7 +126,6 @@ def normalize_positions(element: ET.Element, min_x: float, min_y: float):
         geom = cell.find("./mxGeometry")
         if geom is not None:
             try:
-                # Użyj 0 jako domyślnej jeśli atrybut nie istnieje
                 x = float(geom.get("x", "0"))
                 y = float(geom.get("y", "0"))
                 geom.set("x", str(x - min_x))
@@ -151,7 +137,6 @@ def apply_style_change(cell: ET.Element, style_key: str, style_value: str):
     """Dodaje lub modyfikuje pojedynczy klucz w atrybucie 'style' komórki."""
     if cell is None: return
     style = cell.get("style", "")
-    # Prostsze podejście: rozbij styl na pary, zmień/dodaj, złóż z powrotem
     style_parts = [part.strip() for part in style.split(';') if part.strip()]
     new_parts = []
     found = False
@@ -164,7 +149,6 @@ def apply_style_change(cell: ET.Element, style_key: str, style_value: str):
     if not found:
         new_parts.append(f"{style_key}={style_value}")
 
-    # Złóż styl z powrotem, upewniając się, że kończy się średnikiem jeśli nie jest pusty
     new_style = ";".join(new_parts)
     if new_style and not new_style.endswith(';'):
         new_style += ';'
@@ -172,39 +156,69 @@ def apply_style_change(cell: ET.Element, style_key: str, style_value: str):
 
 
 def create_group_cell(group_id: str, parent_id: str, x: float, y: float, width: float, height: float) -> ET.Element:
-     """Tworzy element mxCell reprezentujący grupę."""
-     group_cell = ET.Element("mxCell", {
-        "id": group_id, "value": "", "style": "group;strokeColor=none;fillColor=none;", # Styl przezroczystej grupy
+    """Tworzy element mxCell reprezentujący grupę."""
+    group_cell = ET.Element("mxCell", {
+        "id": group_id, "value": "", "style": "group;strokeColor=none;fillColor=none;",
         "vertex": "1", "connectable": "0",
         "parent": parent_id
-     })
-     ET.SubElement(group_cell, "mxGeometry", {
+    })
+    ET.SubElement(group_cell, "mxGeometry", {
         "x": str(x), "y": str(y),
         "width": str(width), "height": str(height),
         "as": "geometry"
-     })
-     return group_cell
+    })
+    return group_cell
 
 def create_label_cell(label_id: str, parent_id: str, value: str, x: float, y: float, width: float, height: float, style: str) -> ET.Element:
-     """Tworzy element mxCell dla etykiety tekstowej."""
-     label_cell = ET.Element("mxCell", {
+    """Tworzy element mxCell dla etykiety tekstowej lub innego wierzchołka."""
+    label_cell = ET.Element("mxCell", {
          "id": label_id, "value": value, "style": style,
          "vertex": "1", "parent": parent_id
-     })
-     ET.SubElement(label_cell, "mxGeometry", {
+    })
+    ET.SubElement(label_cell, "mxGeometry", {
          "x": str(x), "y": str(y),
          "width": str(width), "height": str(height),
          "as": "geometry"
-     })
-     return label_cell
+    })
+    return label_cell
 
 def create_edge_cell(edge_id: str, parent_id: str, source_id: str, target_id: str, style: str) -> ET.Element:
-     """Tworzy element mxCell dla krawędzi (linii)."""
-     edge_cell = ET.Element("mxCell", {
-         "id": edge_id, "value": "", "style": style,
-         "edge": "1", "parent": parent_id, # Krawędzie też muszą mieć parent (zwykle '1')
-         "source": source_id if source_id else "", # Ustaw source/target
-         "target": target_id if target_id else ""
-     })
-     ET.SubElement(edge_cell, "mxGeometry", {"relative": "1", "as": "geometry"})
-     return edge_cell
+    """Tworzy element mxCell dla krawędzi (linii) z logicznym source/target."""
+    edge_cell = ET.Element("mxCell", {
+        "id": edge_id, "value": "", "style": style,
+        "edge": "1", "parent": parent_id,
+        "source": source_id if source_id else "",
+        "target": target_id if target_id else ""
+    })
+    ET.SubElement(edge_cell, "mxGeometry", {"relative": "1", "as": "geometry"})
+    return edge_cell
+
+# --- NOWA FUNKCJA ---
+def create_floating_edge_cell(edge_id: str, parent_id: str, style: str,
+                              source_point: tuple[float, float],
+                              target_point: tuple[float, float],
+                              waypoints: list[tuple[float, float]] = None) -> ET.Element:
+    """
+    Tworzy element mxCell dla krawędzi (linii) zdefiniowanej przez punkty,
+    bez ustawiania atrybutów source i target.
+    """
+    edge_cell = ET.Element("mxCell", {
+        "id": edge_id, "value": "", "style": style,
+        "edge": "1", "parent": parent_id # Krawędzie też muszą mieć parent (zwykle '1')
+        # UWAGA: BRAK source i target
+    })
+    geometry = ET.SubElement(edge_cell, "mxGeometry", {"relative": "1", "as": "geometry"})
+
+    # Dodaj punkt początkowy
+    ET.SubElement(geometry, "mxPoint", {"as": "sourcePoint", "x": str(source_point[0]), "y": str(source_point[1])})
+    # Dodaj punkt końcowy
+    ET.SubElement(geometry, "mxPoint", {"as": "targetPoint", "x": str(target_point[0]), "y": str(target_point[1])})
+
+    # Dodaj waypointy, jeśli istnieją
+    if waypoints:
+        points_array = ET.SubElement(geometry, "Array", {"as": "points"})
+        for wp_x, wp_y in waypoints:
+            ET.SubElement(points_array, "mxPoint", {"x": str(wp_x), "y": str(wp_y)})
+
+    return edge_cell
+# --- KONIEC NOWEJ FUNKCJI ---
