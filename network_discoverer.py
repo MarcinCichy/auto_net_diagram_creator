@@ -2,10 +2,11 @@
 
 import time
 import logging
+import re
 from typing import Dict, List, Any, Optional, Tuple
 
 from librenms_client import LibreNMSAPI
-import config_loader
+import config_loader # Nadal potrzebne do get_communities_to_try
 import data_processing
 import discovery
 import file_io
@@ -26,6 +27,8 @@ class NetworkDiscoverer:
         self.phys_mac_map: Dict[str, Dict] = {}
         self.all_devices_from_api: List[Dict] = []
         self.port_to_ifindex_map: Dict[Tuple[str, str], Any] = {}
+        # Przechowaj strukturę poświadczeń CLI wczytaną przez config_loader
+        self.cli_credentials: Dict[str, Any] = config.get('cli_credentials', {"defaults": {}, "devices": []})
 
     def discover_connections(self) -> None:
         """Główna metoda uruchamiająca proces odkrywania."""
@@ -42,7 +45,6 @@ class NetworkDiscoverer:
             return
 
         logger.info("[Odkrywanie 3/5] Pobieranie pełnej listy urządzeń z API...")
-        # Pobieramy kolumny potrzebne do identyfikacji i wzbogacania
         self.all_devices_from_api = self.api_client.get_devices(columns="device_id,hostname,ip,sysName,purpose")
         if not self.all_devices_from_api:
             logger.error("Nie udało się pobrać listy urządzeń z API.")
@@ -69,6 +71,78 @@ class NetworkDiscoverer:
         file_io.save_connections_txt([], self.conn_txt_path)
         file_io.save_connections_json([], self.conn_json_path)
 
+    def _get_cli_credentials_for_device(self, device_info: Dict) -> Optional[Tuple[str, str]]:
+        """
+        Wyszukuje odpowiednie poświadczenia CLI dla danego urządzenia w strukturze
+        wczytanej z pliku credentials.json.
+        Kolejność sprawdzania: Dokładne dopasowanie IP/Host/Purpose/CanonID -> Regex -> Domyślne z JSON.
+        """
+        if not device_info:
+            return None
+
+        # Zbierz potencjalne identyfikatory do sprawdzenia
+        identifiers_to_check = list(filter(None, [
+            device_info.get('ip'),
+            device_info.get('hostname'),
+            device_info.get('purpose'),
+            get_canonical_identifier(device_info) # Sprawdź też kanoniczny ID
+        ]))
+        # Potrzebujemy wersji lowercase do porównań case-insensitive
+        identifiers_to_check_lower = {str(i).lower() for i in identifiers_to_check}
+
+        device_creds_list = self.cli_credentials.get("devices", [])
+
+        # 1. Sprawdź dokładne dopasowania w "devices" (case-insensitive dla stringów)
+        for cred_entry in device_creds_list:
+            identifier_entry = cred_entry.get("identifier")
+            # Pomijamy wpisy regex na tym etapie
+            if not identifier_entry or cred_entry.get("match") == "regex":
+                continue
+
+            if str(identifier_entry).lower() in identifiers_to_check_lower:
+                user = cred_entry.get("cli_user")
+                password = cred_entry.get("cli_pass")
+                if user and password:
+                    logger.debug(f"Znaleziono dokładne dopasowanie CLI dla identyfikatora '{identifier_entry}' dla urządzenia {device_info.get('ip') or device_info.get('hostname')}.")
+                    return user, password
+
+        # 2. Sprawdź dopasowania regex w "devices" (na hostname, purpose, canonical ID - case-insensitive)
+        for cred_entry in device_creds_list:
+            identifier_pattern = cred_entry.get("identifier")
+            # Tylko wpisy oznaczone jako regex
+            if not identifier_pattern or cred_entry.get("match") != "regex":
+                continue
+
+            try:
+                # Sprawdzamy wzorzec na wszystkich potencjalnych identyfikatorach (string)
+                for identifier_str in identifiers_to_check:
+                    if isinstance(identifier_str, str) and re.fullmatch(identifier_pattern, identifier_str, re.IGNORECASE):
+                        user = cred_entry.get("cli_user")
+                        password = cred_entry.get("cli_pass")
+                        if user and password:
+                            logger.debug(f"Znaleziono dopasowanie regex CLI '{identifier_pattern}' dla identyfikatora '{identifier_str}' urządzenia {device_info.get('ip') or device_info.get('hostname')}.")
+                            return user, password
+                        break # Wystarczy pierwsze dopasowanie regex dla danego wpisu
+            except re.error as e:
+                logger.warning(f"Błąd w wyrażeniu regularnym '{identifier_pattern}' w pliku poświadczeń: {e}")
+            except Exception as e:
+                 logger.warning(f"Niespodziewany błąd podczas dopasowywania regex '{identifier_pattern}': {e}")
+
+
+        # 3. Użyj "defaults" z pliku JSON, jeśli istnieją
+        defaults = self.cli_credentials.get("defaults", {})
+        default_user = defaults.get("cli_user")
+        default_pass = defaults.get("cli_pass")
+        if default_user and default_pass:
+            logger.debug(f"Używanie domyślnych poświadczeń CLI z pliku JSON dla urządzenia {device_info.get('ip') or device_info.get('hostname')}.")
+            return default_user, default_pass
+
+        # 4. Brak pasujących poświadczeń
+        current_canonical_id = get_canonical_identifier(device_info)
+        logger.info(f"Nie znaleziono odpowiednich poświadczeń CLI (ani domyślnych w JSON) dla urządzenia {current_canonical_id} (sprawdzano: {identifiers_to_check}).")
+        return None
+
+
     def _process_all_target_devices(self, target_ips_or_hosts: List[str]) -> List[Dict]:
         """Iteruje przez listę docelową i uruchamia odkrywanie dla każdego urządzenia."""
         all_connections: List[Dict] = []
@@ -82,12 +156,11 @@ class NetworkDiscoverer:
                 continue
 
             device_connections = self._process_target_device(target_device, ip_or_host)
+            canonical_id = get_canonical_identifier(target_device, ip_or_host)
             if device_connections:
-                 canonical_id = get_canonical_identifier(target_device, ip_or_host)
                  logger.info(f"✓ Znaleziono {len(device_connections)} potencjalnych połączeń dla {canonical_id}.")
                  all_connections.extend(device_connections)
             else:
-                 canonical_id = get_canonical_identifier(target_device, ip_or_host)
                  logger.info(f"❌ Nie wykryto połączeń dla {canonical_id}.")
 
         return all_connections
@@ -95,8 +168,6 @@ class NetworkDiscoverer:
     def _process_target_device(self, target_device: Dict, original_identifier: str) -> List[Dict]:
         """Wykonuje różne metody odkrywania dla pojedynczego urządzenia docelowego."""
         dev_id = target_device['device_id']
-        dev_host = target_device.get('hostname')
-        dev_ip = target_device.get('ip')
         canonical_id = get_canonical_identifier(target_device, original_identifier)
         logger.info(f"Przetwarzanie jako: {canonical_id} (ID: {dev_id})")
 
@@ -112,22 +183,28 @@ class NetworkDiscoverer:
             device_connections.extend(discovery.find_via_snmp_fdb(self.phys_mac_map, target_device, communities, idx2name))
             device_connections.extend(discovery.find_via_arp_snmp(self.phys_mac_map, target_device, communities, idx2name))
         else:
-            logger.info("Brak skonfigurowanych community SNMP do próby.")
+            logger.info("Brak skonfigurowanych community SNMP do próby dla metod SNMP.")
 
         # Metoda API FDB
         device_connections.extend(discovery.find_via_api_fdb(self.api_client, self.phys_mac_map, target_device))
 
-        # Metoda CLI
-        cli_user = self.config.get("cli_username")
-        cli_pass = self.config.get("cli_password")
-        if cli_user and cli_pass:
-            target_for_cli = dev_host or dev_ip
+        # Metoda CLI - Z użyciem wyszukanych poświadczeń
+        cli_credentials = self._get_cli_credentials_for_device(target_device)
+        if cli_credentials:
+            cli_user, cli_pass = cli_credentials
+            # Potrzebujemy IP lub hostname do połączenia Netmiko
+            target_for_cli = target_device.get('hostname') or target_device.get('ip')
             if target_for_cli:
-                device_connections.extend(discovery.find_via_cli(target_for_cli, cli_user, cli_pass))
+                # Sprawdź, czy user i pass nie są puste (dodatkowe zabezpieczenie)
+                if cli_user and cli_pass:
+                    device_connections.extend(discovery.find_via_cli(target_for_cli, cli_user, cli_pass))
+                else:
+                     logger.warning(f"Pominięto próbę CLI dla {canonical_id} - znaleziono wpis, ale brak w nim użytkownika lub hasła.")
             else:
-                logger.warning("CLI: Brak hostname/IP do próby połączenia.")
+                logger.warning(f"CLI: Brak hostname/IP do próby połączenia dla {canonical_id}, mimo znalezienia poświadczeń.")
         else:
-            logger.info("Brak danych logowania CLI w konfiguracji.")
+            # Logowanie o braku poświadczeń jest już w _get_cli_credentials_for_device
+            logger.info(f"Pominięto próbę CLI dla {canonical_id} - brak odpowiednich poświadczeń.")
 
         return device_connections
 
@@ -152,17 +229,26 @@ class NetworkDiscoverer:
                         ifindex = p.get("ifIndex")
                         if ifindex is None: continue
 
+                        # Klucz mapy: (canonical_id, nazwa_portu_lub_aliasu_lub_opisu)
+                        # Mapujemy różne nazwy na ten sam ifIndex
+
                         ifname = p.get("ifName")
                         if ifname:
                             self.port_to_ifindex_map[(canonical_id, ifname)] = ifindex
+                            # Dodaj też wersję lowercase dla pewności dopasowania
+                            self.port_to_ifindex_map[(canonical_id, ifname.lower())] = ifindex
 
                         ifdescr = p.get("ifDescr")
                         if ifdescr and ifdescr != ifname:
                             self.port_to_ifindex_map[(canonical_id, ifdescr)] = ifindex
+                            self.port_to_ifindex_map[(canonical_id, ifdescr.lower())] = ifindex
+
 
                         ifalias = p.get("ifAlias")
                         if ifalias and ifalias != ifname and ifalias != ifdescr:
                             self.port_to_ifindex_map[(canonical_id, ifalias)] = ifindex
+                            self.port_to_ifindex_map[(canonical_id, ifalias.lower())] = ifindex
+
             except Exception as e:
                 logger.warning(f"Błąd pobierania portów API dla mapy ifIndex (urządzenie ID {dev_id}, nazwa {canonical_id}): {e}")
         logger.info(f"✓ Zbudowano mapę port -> ifIndex dla {len(self.port_to_ifindex_map)} wpisów.")
@@ -188,21 +274,29 @@ class NetworkDiscoverer:
             remote_canonical = get_canonical_identifier(remote_info, remote_original)
 
             # Podstawowe filtrowanie
+            if not local_canonical or not remote_canonical:
+                 logger.debug(f"Pomijanie połączenia - brak identyfikatora kanonicznego dla hosta lokalnego lub zdalnego: {conn_raw}")
+                 continue
             if str(remote_canonical).lower() == 'null' or remote_canonical is None:
                 logger.debug(f"Pomijanie połączenia - remote_canonical to null/None: {conn_raw}")
                 continue
-            if local_canonical and remote_canonical and local_canonical == remote_canonical:
-                logger.debug(f"Pomijanie połączenia - self-connection: {local_canonical}")
+            # Sprawdzanie self-connection teraz na identyfikatorach kanonicznych
+            if local_canonical == remote_canonical:
+                logger.debug(f"Pomijanie połączenia - self-connection (kanoniczne): {local_canonical}")
                 continue
 
-            # Wzbogacanie o ifIndex
-            local_ifindex = local_ifindex_cli
-            if local_ifindex is None and local_canonical and local_if_raw:
-                local_ifindex = self.port_to_ifindex_map.get((local_canonical, local_if_raw))
+            # Wzbogacanie o ifIndex - używamy mapy zbudowanej wcześniej
+            local_ifindex = local_ifindex_cli # Z CLI ma pierwszeństwo
+            if local_ifindex is None and local_if_raw:
+                 # Szukamy po nazwie oryginalnej i lowercase
+                 local_ifindex = self.port_to_ifindex_map.get((local_canonical, local_if_raw)) or \
+                                 self.port_to_ifindex_map.get((local_canonical, local_if_raw.lower()))
 
             remote_ifindex = None
-            if remote_canonical and remote_if_raw:
-                remote_ifindex = self.port_to_ifindex_map.get((remote_canonical, remote_if_raw))
+            if remote_if_raw:
+                 remote_ifindex = self.port_to_ifindex_map.get((remote_canonical, remote_if_raw)) or \
+                                  self.port_to_ifindex_map.get((remote_canonical, remote_if_raw.lower()))
+
 
             enriched_conn_pre_filter = {
                 "local_device": local_canonical,
@@ -219,7 +313,6 @@ class NetworkDiscoverer:
                 "remote_device_ip": remote_info.get('ip') if remote_info else None,
                 "remote_device_hostname": remote_info.get('hostname') if remote_info else None,
                 "remote_device_purpose": remote_info.get('purpose') if remote_info else None,
-                # Zachowaj oryginalny identyfikator zdalny, jeśli nie znaleziono go w API
                 "remote_device_original": remote_original if not remote_info else None
             }
             # Usuń klucze z wartościami None

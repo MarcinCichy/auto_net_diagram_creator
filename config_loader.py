@@ -1,56 +1,93 @@
-# config_loader.py
+# --- config_loader.py ---
+
+import json
 import os
+import logging
 from dotenv import load_dotenv
+from typing import Dict, Any, Optional, List
 
-# Ładuje zmienne z pliku .env do zmiennych środowiskowych
-load_dotenv()
+logger = logging.getLogger(__name__)
+load_dotenv() # Wczytuje zmienne z .env do środowiska
 
-# Usunięto DEFAULT_DEVICE_CREDENTIALS_FILE
+DEFAULT_CREDENTIALS_FILE = "credentials.json"
 
-def get_env_config():
+def get_env_config() -> Dict[str, Any]:
     """
-    Pobiera konfigurację podstawową ze zmiennych środowiskowych (.env).
-    Wczytuje listę domyślnych community SNMP.
+    Pobiera konfigurację podstawową ze zmiennych środowiskowych (.env)
+    oraz wczytuje konfigurację poświadczeń CLI z pliku JSON.
     """
     base_url = os.getenv("BASE_URL")
     api_key = os.getenv("API_KEY")
     snmp_communities_str = os.getenv("SNMP_COMMUNITIES") # Wczytaj jako string
-    default_snmp_communities = [] # Inicjalizuj jako pustą listę
+    default_snmp_communities: List[str] = [] # Inicjalizuj jako pustą listę
     if snmp_communities_str:
         # Podziel string po przecinkach i usuń białe znaki
         default_snmp_communities = [comm.strip() for comm in snmp_communities_str.split(',') if comm.strip()]
-        print(f"ⓘ Znaleziono {len(default_snmp_communities)} community w .env: {', '.join(default_snmp_communities)}")
-    cli_user = os.getenv("CLI_USER")
-    cli_pass = os.getenv("CLI_PASS")
+        logger.info(f"Znaleziono {len(default_snmp_communities)} community SNMP w .env: {', '.join(default_snmp_communities)}")
 
     if not base_url or not api_key:
         raise ValueError("Brakuje wymaganych zmiennych BASE_URL lub API_KEY w pliku .env")
 
-    if not default_snmp_communities:
-        print("⚠ Ostrzeżenie: Brak lub pusta lista SNMP_COMMUNITIES w .env. Metody SNMP nie będą działać.")
-    if not cli_user or not cli_pass:
-        print("Informacja: Brak CLI_USER/CLI_PASS w .env - metoda CLI nie będzie dostępna.")
+    # Wczytaj konfigurację poświadczeń CLI z pliku JSON
+    device_credentials = load_device_credentials()
 
-    return {
+    # Logowanie ostrzeżeń o braku konfiguracji
+    if not default_snmp_communities:
+        logger.warning("Brak lub pusta lista SNMP_COMMUNITIES w .env. Metody SNMP nie będą działać poprawnie.")
+    if not device_credentials.get("devices") and not device_credentials.get("defaults", {}).get("cli_user"):
+         logger.info(f"Brak specyficznych poświadczeń CLI w '{DEFAULT_CREDENTIALS_FILE}' oraz brak domyślnych ('defaults'). Metoda CLI nie będzie używana, chyba że poświadczenia zostaną dodane.")
+
+
+    config = {
         "base_url": base_url,
         "api_key": api_key,
-        # *** POPRAWKA: Przechowuj całą listę community ***
         "default_snmp_communities": default_snmp_communities,
-        # ***********************************************
-        "cli_username": cli_user,
-        "cli_password": cli_pass,
+        # Przekaż całą strukturę poświadczeń wczytaną z JSON
+        "cli_credentials": device_credentials,
     }
 
-# Usunięto funkcję load_device_credentials
+    return config
 
-# Funkcja get_communities_to_try (bez zmian, oczekuje listy)
-def get_communities_to_try(default_communities_list):
+def load_device_credentials(filepath: str = DEFAULT_CREDENTIALS_FILE) -> Dict[str, Any]:
+    """Wczytuje poświadczenia CLI (domyślne i specyficzne dla urządzeń) z pliku JSON."""
+    # Struktura domyślna, jeśli plik nie istnieje lub jest pusty/błędny
+    credentials: Dict[str, Any] = {"defaults": {}, "devices": []}
+    if not os.path.exists(filepath):
+        logger.warning(f"Plik poświadczeń '{filepath}' nie znaleziony. Metoda CLI będzie działać tylko jeśli w tym pliku zostaną zdefiniowane poświadczenia (w sekcji 'devices' lub 'defaults').")
+        return credentials
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            loaded_data = json.load(f)
+            # Prosta walidacja struktury i przypisanie
+            if isinstance(loaded_data, dict):
+                 if isinstance(loaded_data.get("defaults"), dict):
+                     credentials["defaults"] = loaded_data["defaults"]
+                 else:
+                      logger.warning(f"Sekcja 'defaults' w '{filepath}' nie jest słownikiem lub nie istnieje.")
+
+                 if isinstance(loaded_data.get("devices"), list):
+                     credentials["devices"] = loaded_data["devices"]
+                 else:
+                      logger.warning(f"Sekcja 'devices' w '{filepath}' nie jest listą lub nie istnieje.")
+                 logger.info(f"Pomyślnie wczytano dane poświadczeń CLI z '{filepath}'.")
+            else:
+                 logger.error(f"Główna struktura w pliku '{filepath}' nie jest słownikiem (JSON object).")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Błąd parsowania pliku JSON z poświadczeniami '{filepath}': {e}")
+    except Exception as e:
+        logger.error(f"Nieoczekiwany błąd podczas odczytu pliku poświadczeń '{filepath}': {e}")
+
+    return credentials
+
+def get_communities_to_try(default_communities_list: List[str]) -> Optional[List[str]]:
     """
-    Zwraca listę domyślnych community z .env lub None, jeśli lista jest pusta.
+    Zwraca listę domyślnych community SNMP lub None, jeśli lista jest pusta.
+    (Funkcja bez zmian, ale jej argument pochodzi z nowej struktury config)
     """
     if default_communities_list:
-        print(f"  Będę próbował domyślnych community z .env: {len(default_communities_list)} communities.")
-        return default_communities_list # Zwróć listę
+        logger.info(f"Będę próbował domyślnych community SNMP z .env: {len(default_communities_list)} communities.")
+        return default_communities_list
     else:
-        print(f"  ⓘ Brak domyślnych community SNMP w .env do wypróbowania.")
-        return None # Zwróć None
+        logger.warning("Brak domyślnych community SNMP w konfiguracji do wypróbowania.")
+        return None
