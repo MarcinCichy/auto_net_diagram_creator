@@ -1,6 +1,10 @@
 # drawio_utils.py
 import xml.etree.ElementTree as ET
 import re
+import logging # Dodano
+from typing import Optional, List, Tuple, Any, Dict # Dodaj też inne potrzebne typy, jeśli używasz
+
+logger = logging.getLogger(__name__) # Dodano
 
 DEFAULT_TEMPLATE_FILE = "switch.drawio"
 
@@ -221,4 +225,50 @@ def create_floating_edge_cell(edge_id: str, parent_id: str, style: str,
             ET.SubElement(points_array, "mxPoint", {"x": str(wp_x), "y": str(wp_y)})
 
     return edge_cell
-# --- KONIEC NOWEJ FUNKCJI ---
+
+
+# DODANA FUNKCJA (jeśli nie ma jej w Twojej wersji z poprzednich kroków)
+def set_style_value(style_string: Optional[str], key: str, value: str) -> str:
+    """
+    Ustawia lub zastępuje wartość klucza w stringu stylu Draw.io.
+    Zachowuje istniejące pary klucz=wartość.
+    Zwraca nowy string stylu.
+    """
+    if style_string is None:
+        style_string = ""
+
+    style_string = style_string.strip()
+    if style_string.endswith(';'):
+        style_string = style_string[:-1]
+
+    parts = style_string.split(';')
+    new_parts = []
+    found = False
+    key_prefix = f"{key}="
+
+    for part in parts:
+        clean_part = part.strip()
+        if not clean_part: continue
+        if clean_part.startswith(key_prefix):
+            new_parts.append(f"{key_prefix}{value}")
+            found = True
+        else:
+            new_parts.append(clean_part)
+
+    if not found:
+        new_parts.append(f"{key_prefix}{value}")
+
+    # Złóż z powrotem i dodaj końcowy średnik, jeśli są jakieś części
+    result = ";".join(new_parts)
+    if result:
+        result += ';'
+    return result
+
+# Upewnij się, że apply_style_change używa set_style_value lub działa podobnie
+# Możemy zrefaktoryzować apply_style_change:
+def apply_style_change(cell: ET.Element, style_key: str, style_value: str):
+    """Dodaje lub modyfikuje pojedynczy klucz w atrybucie 'style' komórki."""
+    if cell is None: return
+    current_style = cell.get("style", "")
+    new_style = set_style_value(current_style, style_key, style_value)
+    cell.set("style", new_style)
