@@ -1,8 +1,8 @@
 # drawio_layout.py
 
 DEFAULT_DEVICES_PER_ROW = 3
-DEFAULT_MARGIN_X = 300 # Zwiększono marginesy
-DEFAULT_MARGIN_Y = 220
+DEFAULT_MARGIN_X = 450 # Zwiększono marginesy
+DEFAULT_MARGIN_Y = 350
 
 def calculate_grid_layout(num_items: int,
                           item_width: float,

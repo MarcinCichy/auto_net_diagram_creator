@@ -322,7 +322,7 @@ def add_device_to_diagram(
     # Sortowanie portów fizycznych (bez mgmt0 na razie)
     physical_ports_to_draw = [p for p in physical_ports_from_api if p != mgmt0_api_port_info]
     try:
-        physical_ports_to_draw.sort(key=lambda p: natsort_keygen()(p.get('ifName', '')))
+        physical_ports_to_draw.sort(key=lambda p: natsort_keygen(p.get('ifName', '')))
         logger.debug(f"Posortowano {len(physical_ports_to_draw)} portów fizycznych do rysowania.")
     except Exception as e:
          logger.warning(f"Błąd sortowania portów fizycznych: {e}")
@@ -578,7 +578,7 @@ def add_device_to_diagram(
     base_device_label_html += f"<br/>IP: {temp_display_ip}</div>"
     physical_ports_html = f"<b>Porty Fizyczne ({len(physical_ports_from_api)}):</b><br/><div style='margin:0; padding-left:5px; max-height:{PHYSICAL_PORT_LIST_MAX_HEIGHT}px; overflow:auto;'>"
     if physical_ports_from_api:
-        try: physical_ports_from_api.sort(key=lambda p: natsort_keygen()(p.get('ifName', '')))
+        try: physical_ports_from_api.sort(key=lambda p: natsort_keygen(p.get('ifName', '')))
         except Exception as e: logger.warning(f"Błąd sortowania listy portów fizycznych w etykiecie: {e}"); physical_ports_from_api.sort(key=lambda p: p.get('ifName', ''))
         for phys_port in physical_ports_from_api:
             name = phys_port.get('ifName', 'N/A'); descr = phys_port.get('ifDescr', ''); alias = phys_port.get('ifAlias', ''); status = phys_port.get('ifOperStatus', 'unknown').lower(); ifindex = phys_port.get('ifIndex')

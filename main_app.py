@@ -7,6 +7,7 @@ import argparse
 import os
 import logging
 from typing import Dict, Any, List, Optional
+from utils import setup_logging
 
 # --- Importy z naszych modułów ---
 try:
@@ -146,7 +147,7 @@ class Application:
 
 def main():
     """Główna funkcja wejściowa."""
-    setup_logging() # Konfiguracja logowania
+    setup_logging(level=logging.INFO) # Konfiguracja logowania
 
     parser = argparse.ArgumentParser(description="Narzędzie do odkrywania połączeń sieciowych i generowania diagramów Draw.io.")
     parser.add_argument("--discover", action="store_true", help="Uruchom tylko fazę odkrywania.")
