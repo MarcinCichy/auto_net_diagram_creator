@@ -6,7 +6,7 @@ import time
 import argparse
 import os
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional # Dodano Optional
 from utils import setup_logging
 
 # --- Importy z naszych modułów ---
@@ -16,7 +16,7 @@ try:
     from librenms_client import LibreNMSAPI
     from network_discoverer import NetworkDiscoverer
     from diagram_generator import DiagramGenerator
-    from utils import setup_logging # Załóżmy, że setup_logging jest w utils
+    # from utils import setup_logging # Już zaimportowane wyżej
 except ImportError as e:
     print(f"Błąd importu modułu: {e}. Upewnij się, że wszystkie pliki .py znajdują się w odpowiednim miejscu.")
     sys.exit(1)
@@ -28,38 +28,37 @@ except FileNotFoundError as e:
 DEFAULT_IP_LIST_FILE = "ip_list.txt"
 DEFAULT_CONNECTIONS_TXT_FILE = "connections.txt"
 DEFAULT_CONNECTIONS_JSON_FILE = "connections.json"
-DEFAULT_DIAGRAM_TEMPLATE_FILE = "switch.drawio"
-DEFAULT_DIAGRAM_OUTPUT_FILE = "network_diagram.drawio"
+DEFAULT_DIAGRAM_TEMPLATE_FILE = "switch.drawio" # Dla stylów Draw.io
+DEFAULT_DIAGRAM_OUTPUT_DRAWIO_FILE = "network_diagram.drawio"
+DEFAULT_DIAGRAM_OUTPUT_SVG_FILE = "network_diagram.svg"
 
 logger = logging.getLogger(__name__)
 
 class Application:
-    """Główna klasa aplikacji zarządzająca konfiguracją i przepływem pracy."""
-
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.config: Dict[str, Any] = {}
         self.api_client: Optional[LibreNMSAPI] = None
 
     def setup(self) -> bool:
-        """Ładuje konfigurację i inicjalizuje klienta API."""
         logger.info("--- Uruchamianie Aplikacji ---")
         try:
             self.config = config_loader.get_env_config()
         except ValueError as e:
             logger.critical(f"Błąd krytyczny konfiguracji .env: {e}")
             return False
-        except FileNotFoundError:
-            logger.critical("Błąd krytyczny: Plik .env nie został znaleziony.")
-            return False
+        except FileNotFoundError: # Obsługa braku .env
+             logger.critical("Błąd krytyczny: Plik .env nie został znaleziony. Upewnij się, że istnieje i zawiera BASE_URL oraz API_KEY.")
+             return False
         except Exception as e:
-            logger.critical(f"Nieoczekiwany błąd ładowania konfiguracji .env: {e}")
-            return False
+             logger.critical(f"Nieoczekiwany błąd ładowania konfiguracji .env: {e}")
+             return False
+
 
         base_url = self.config.get("base_url")
         api_key = self.config.get("api_key")
 
-        if not base_url or not api_key:
+        if not base_url or not api_key: # Podwójne sprawdzenie, get_env_config powinien już to rzucić
             logger.critical("Błąd krytyczny: Brak base_url lub api_key w konfiguracji .env")
             return False
 
@@ -72,13 +71,11 @@ class Application:
         return True
 
     def run(self) -> None:
-        """Uruchamia wybrane fazy aplikacji."""
         app_start_time = time.time()
 
         if not self.setup():
             sys.exit(1)
 
-        # Sprawdzenie flag po setup, aby self.api_client był dostępny
         run_discovery_flag = self.args.discover
         run_diagram_flag = self.args.diagram
 
@@ -97,7 +94,6 @@ class Application:
         logger.info(f"\n--- Zakończono. Całkowity czas: {app_end_time - app_start_time:.2f} sek. ---")
 
     def _run_discovery_phase(self) -> None:
-        """Uruchamia fazę odkrywania połączeń."""
         if not self.api_client:
              logger.error("Klient API nie został zainicjalizowany. Pomijanie fazy odkrywania.")
              return
@@ -117,46 +113,53 @@ class Application:
 
 
     def _run_diagram_phase(self) -> None:
-        """Uruchamia fazę generowania diagramu."""
         if not self.api_client:
              logger.error("Klient API nie został zainicjalizowany. Pomijanie fazy generowania diagramu.")
              return
 
+        # Sprawdzenie szablonu Draw.io (potrzebny do stylów, nawet dla SVG jako referencja)
         if not os.path.exists(self.args.template):
-            logger.warning(f"Błąd: Plik szablonu '{self.args.template}' nie istnieje. Nie można wygenerować diagramu.")
-            return
-        if not os.path.exists(self.args.conn_json):
-             logger.warning(f"Plik połączeń '{self.args.conn_json}' nie istnieje. Diagram zostanie wygenerowany bez linii połączeń.")
-             # Mimo braku pliku json, generujemy diagram z samymi urządzeniami
-             # Można by dodać opcję przerwania, ale obecne zachowanie jest OK
+            logger.warning(f"Błąd: Plik szablonu DrawIO '{self.args.template}' nie istnieje. Style mogą być domyślne.")
+            # Kontynuujemy, używając domyślnych stylów w StyleInfo
 
-        logger.info("\n=== Rozpoczynanie Fazy Generowania Diagramu ===")
+        if not os.path.exists(self.args.conn_json):
+             logger.warning(f"Plik połączeń '{self.args.conn_json}' nie istnieje. Diagramy zostaną wygenerowane bez linii połączeń.")
+
+        logger.info("\n=== Rozpoczynanie Fazy Generowania Diagramów (DrawIO i SVG) ===")
         start_time = time.time()
+
         generator = DiagramGenerator(
             api_client=self.api_client,
-            config=self.config, # Przekazanie config może być potrzebne w przyszłości
+            config=self.config,
             ip_list_path=self.args.ip_list,
             template_path=self.args.template,
-            output_path=self.args.diagram_out,
+            output_path_drawio=self.args.diagram_out_drawio,
+            output_path_svg=self.args.diagram_out_svg,
             connections_json_path=self.args.conn_json
         )
         generator.generate_diagram()
         end_time = time.time()
-        logger.info(f"=== Zakończono Fazę Generowania Diagramu (czas: {end_time - start_time:.2f} sek.) ===")
+        logger.info(f"=== Zakończono Fazę Generowania Diagramów (czas: {end_time - start_time:.2f} sek.) ===")
 
 
 def main():
-    """Główna funkcja wejściowa."""
-    setup_logging(level=logging.INFO) # Konfiguracja logowania
+    # Użyj log_file zdefiniowany w utils.py, jeśli tam jest, lub podaj konkretną nazwę tutaj
+    setup_logging(level=logging.INFO, log_to_file=True, log_file="auto_diagram_app.log")
 
-    parser = argparse.ArgumentParser(description="Narzędzie do odkrywania połączeń sieciowych i generowania diagramów Draw.io.")
+    parser = argparse.ArgumentParser(description="Narzędzie do odkrywania połączeń sieciowych i generowania diagramów Draw.io/SVG.")
     parser.add_argument("--discover", action="store_true", help="Uruchom tylko fazę odkrywania.")
-    parser.add_argument("--diagram", action="store_true", help="Uruchom tylko fazę generowania diagramu.")
-    parser.add_argument("--ip-list", default=DEFAULT_IP_LIST_FILE, help=f"Plik z listą IP/Hostname urządzeń do umieszczenia na diagramie (domyślnie: {DEFAULT_IP_LIST_FILE}).")
-    parser.add_argument("--conn-txt", default=DEFAULT_CONNECTIONS_TXT_FILE, help=f"Plik .txt z wynikowymi połączeniami (domyślnie: {DEFAULT_CONNECTIONS_TXT_FILE}).")
-    parser.add_argument("--conn-json", default=DEFAULT_CONNECTIONS_JSON_FILE, help=f"Plik .json z wynikowymi połączeniami (domyślnie: {DEFAULT_CONNECTIONS_JSON_FILE}).")
-    parser.add_argument("--template", default=DEFAULT_DIAGRAM_TEMPLATE_FILE, help=f"Plik szablonu .drawio urządzenia (domyślnie: {DEFAULT_DIAGRAM_TEMPLATE_FILE}).")
-    parser.add_argument("--diagram-out", default=DEFAULT_DIAGRAM_OUTPUT_FILE, help=f"Plik wyjściowy diagramu .drawio (domyślnie: {DEFAULT_DIAGRAM_OUTPUT_FILE}).")
+    parser.add_argument("--diagram", action="store_true", help="Uruchom tylko fazę generowania diagramów (DrawIO i SVG).")
+
+    parser.add_argument("--ip-list", default=DEFAULT_IP_LIST_FILE, help=f"Plik z listą IP/Hostname (dom: {DEFAULT_IP_LIST_FILE}).")
+    parser.add_argument("--conn-txt", default=DEFAULT_CONNECTIONS_TXT_FILE, help=f"Plik .txt z połączeniami (dom: {DEFAULT_CONNECTIONS_TXT_FILE}).")
+    parser.add_argument("--conn-json", default=DEFAULT_CONNECTIONS_JSON_FILE, help=f"Plik .json z połączeniami (dom: {DEFAULT_CONNECTIONS_JSON_FILE}).")
+    parser.add_argument("--template", default=DEFAULT_DIAGRAM_TEMPLATE_FILE, help=f"Plik szablonu .drawio dla stylów (dom: {DEFAULT_DIAGRAM_TEMPLATE_FILE}).")
+
+    parser.add_argument("--diagram-out-drawio", default=DEFAULT_DIAGRAM_OUTPUT_DRAWIO_FILE,
+                        help=f"Plik wyjściowy diagramu .drawio (dom: {DEFAULT_DIAGRAM_OUTPUT_DRAWIO_FILE}).")
+    parser.add_argument("--diagram-out-svg", default=DEFAULT_DIAGRAM_OUTPUT_SVG_FILE,
+                        help=f"Plik wyjściowy diagramu .svg (dom: {DEFAULT_DIAGRAM_OUTPUT_SVG_FILE}).")
+
     parser.add_argument("--no-verify-ssl", action="store_true", help="Wyłącz weryfikację SSL dla API LibreNMS.")
     args = parser.parse_args()
 
