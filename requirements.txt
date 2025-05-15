@@ -1,2 +1,7 @@
 requests
 python-dotenv
+pysnmp
+netmiko
+lxml
+colorlog
+natsort

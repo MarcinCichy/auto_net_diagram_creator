@@ -1,5 +1,5 @@
 # --- svg_generator.py ---
-import xml.et.ElementTree as ET
+import xml.etree.ElementTree as ET
 import re
 import math
 import logging
