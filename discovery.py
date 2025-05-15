@@ -1,4 +1,10 @@
 # discovery.py
+
+import os, sys
+print(">>> discovery.py sees CWD:", os.getcwd())
+print(">>> discovery.py sees sys.path[0]:", sys.path[0])
+print(">>> files here:", os.listdir(sys.path[0]))
+
 from librenms_client import LibreNMSAPI
 try:
     import snmp_utils

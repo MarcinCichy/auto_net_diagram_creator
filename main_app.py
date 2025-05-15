@@ -9,6 +9,11 @@ import logging
 from typing import Dict, Any, List, Optional # Dodano Optional
 from utils import setup_logging
 
+import sys
+print(">>> Interpreter:", sys.executable)
+print(">>> sys.path:")
+for p in sys.path: print("   ", p)
+
 # --- Importy z naszych modułów ---
 try:
     import config_loader
