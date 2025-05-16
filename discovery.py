@@ -10,6 +10,9 @@ try:
     import snmp_utils
 except ImportError:
     print("OSTRZEŻENIE: Moduł snmp_utils.py nie został znaleziony. Funkcje SNMP nie będą działać.")
+    import traceback
+
+    traceback.print_exc()  # TO JEST KLUCZOWE
     class snmp_utils: # Stub class
         @staticmethod
         def snmp_get_lldp_neighbors(h, c): print(f"  SNMP stub: snmp_get_lldp_neighbors({h}, ***)"); return None
