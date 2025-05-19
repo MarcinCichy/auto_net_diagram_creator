@@ -1,47 +1,56 @@
 # drawio_layout.py
+import logging
+from typing import List, Tuple
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DEVICES_PER_ROW = 3
-DEFAULT_MARGIN_X = 450 # Zwiększono marginesy
-DEFAULT_MARGIN_Y = 350
+DEFAULT_MARGIN_X = 450  # Poziomy odstęp między urządzeniami ORAZ margines od krawędzi diagramu
+DEFAULT_MARGIN_Y = 350  # Pionowy odstęp między urządzeniami ORAZ margines od krawędzi diagramu
 
-def calculate_grid_layout(num_items: int,
-                          item_width: float,
-                          item_height: float,
-                          items_per_row: int = DEFAULT_DEVICES_PER_ROW,
-                          margin_x: float = DEFAULT_MARGIN_X,
-                          margin_y: float = DEFAULT_MARGIN_Y) -> list[tuple[float, float]]:
+
+def calculate_grid_layout(
+        num_items: int,
+        item_width: float,  # Maksymalna szerokość elementu
+        item_height: float,  # Maksymalna wysokość elementu
+        items_per_row: int = DEFAULT_DEVICES_PER_ROW,
+        margin_x: float = DEFAULT_MARGIN_X,  # Odstęp między kolumnami
+        margin_y: float = DEFAULT_MARGIN_Y,  # Odstęp między rzędami
+        start_offset_x: float = DEFAULT_MARGIN_X / 2,  # Początkowy margines od lewej krawędzi diagramu
+        start_offset_y: float = DEFAULT_MARGIN_Y / 2  # Początkowy margines od górnej krawędzi diagramu
+) -> List[Tuple[float, float]]:
     """
-    Oblicza pozycje (x, y) dla siatki elementów. Zakłada stały rozmiar elementów.
-
-    Args:
-        num_items (int): Liczba elementów do rozmieszczenia.
-        item_width (float): Szerokość pojedynczego elementu.
-        item_height (float): Wysokość pojedynczego elementu.
-        items_per_row (int): Maksymalna liczba elementów w rzędzie.
-        margin_x (float): Poziomy odstęp między elementami.
-        margin_y (float): Pionowy odstęp między rzędami.
-
-    Returns:
-        list[tuple[float, float]]: Lista krotek (x, y) dla lewego górnego rogu każdego elementu.
+    Oblicza pozycje (x, y) dla lewego górnego rogu każdego elementu w siatce.
     """
-    positions = []
-    if items_per_row <= 0: items_per_row = 1
-    if num_items <= 0: return []
+    positions: List[Tuple[float, float]] = []
+    if num_items <= 0:
+        logger.warning("calculate_grid_layout wywołane z num_items <= 0. Zwracam pustą listę pozycji.")
+        return positions
+    if items_per_row <= 0:
+        logger.warning("items_per_row musi być większe od 0. Ustawiam na 1.")
+        items_per_row = 1
 
-    start_x = margin_x # Dodajmy margines początkowy
-    start_y = margin_y
-    current_x = start_x
-    current_y = start_y
+    logger.debug(
+        f"Obliczanie layoutu siatki dla {num_items} elementów. "
+        f"Rozmiar elementu (max): {item_width:.0f}x{item_height:.0f}. "
+        f"Elementów na rząd: {items_per_row}. Marginesy X/Y: {margin_x}/{margin_y}. "
+        f"Offset startowy X/Y: {start_offset_x}/{start_offset_y}."
+    )
 
+    current_x = start_offset_x
+    current_y = start_offset_y
+
+    col_count = 0
     for i in range(num_items):
         positions.append((current_x, current_y))
+        logger.debug(f"  Pozycja dla elementu {i + 1}: ({current_x:.0f}, {current_y:.0f})")
 
-        # Przesuń X na następną pozycję
-        current_x += item_width + margin_x
-
-        # Sprawdź, czy przejść do nowego rzędu
-        if (i + 1) % items_per_row == 0:
-            current_x = start_x # Reset X do pozycji początkowej
-            current_y += item_height + margin_y # Przesuń Y w dół o wysokość + margines
+        col_count += 1
+        if col_count < items_per_row:  # Jeśli nie ostatni element w rzędzie (lub jedyny)
+            current_x += item_width + margin_x  # Przesuń w prawo
+        else:  # Ostatni element w rzędzie, przejdź do nowego rzędu
+            current_x = start_offset_x  # Reset X
+            current_y += item_height + margin_y  # Przesuń Y w dół
+            col_count = 0
 
     return positions

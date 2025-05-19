@@ -1,26 +1,25 @@
 # --- diagram_generator.py ---
-
 import time
 import logging
 import xml.etree.ElementTree as ET
 import re
 from typing import Dict, List, Any, Optional, Tuple, Set
+import pprint
+import cli_utils
 
 from librenms_client import LibreNMSAPI
 import file_io
 import drawio_base
 import drawio_layout
-import drawio_device_builder  # Importujemy cały moduł
-from drawio_device_builder import (
-    calculate_dynamic_device_size,
-    add_device_to_diagram as add_device_to_drawio_diagram,  # Alias dla jasności
-    StyleInfo,
-    PortEndpointData,
-    _extract_styles_from_template,
-    WAYPOINT_OFFSET as DRAWIO_WAYPOINT_OFFSET
-)
-import svg_generator  # Importujemy nasz nowy moduł SVG
 import drawio_utils
+import drawio_device_builder  # Nadal potrzebny dla _extract_styles_from_template i StyleInfo
+from drawio_device_builder import StyleInfo as DrawioStyleInfo
+import svg_generator
+
+# --- NOWY, KLUCZOWY IMPORT ---
+import common_device_logic  # Zakładamy, że ten plik istnieje i jest w PYTHONPATH
+from common_device_logic import PortEndpointData, DeviceDisplayData
+
 from utils import find_device_in_list, get_canonical_identifier
 
 logger = logging.getLogger(__name__)
@@ -37,390 +36,428 @@ class DiagramGenerator:
         self.api_client = api_client
         self.config = config
         self.ip_list_path = ip_list_path
-        self.template_path = template_path  # Używany do stylów Draw.io i jako referencja dla SVG
+        self.template_path = template_path
         self.output_path_drawio = output_path_drawio
         self.output_path_svg = output_path_svg
         self.connections_json_path = connections_json_path
 
-        self.all_devices_from_api: List[Dict] = []
-        self.target_devices_info: List[Dict] = []
-        # To mapowanie będzie używane przez obie logiki rysowania połączeń.
-        # Ważne, aby PortEndpointData.x i .y były globalnymi współrzędnymi.
-        self.port_mappings: Dict[Any, Dict[Any, PortEndpointData]] = {}
+        self.all_devices_from_api: List[Dict[str, Any]] = []
+        self.target_devices_prepared_data: List[DeviceDisplayData] = []
 
-        # Inicjalizacja dla Draw.io
+        self.port_endpoint_mappings_drawio: Dict[
+            str, Dict[Any, PortEndpointData]] = {}  # Klucz główny to lowercase canonical_id
+        self.port_endpoint_mappings_svg: Dict[
+            str, Dict[Any, PortEndpointData]] = {}  # Klucz główny to lowercase canonical_id
+
         self.drawio_xml_generator: Optional[drawio_base.DrawioXMLGenerator] = drawio_base.DrawioXMLGenerator()
-        self.global_drawio_root_cell: Optional[ET.Element] = self.drawio_xml_generator.get_root_element()
-        try:
-            # Style te będą używane przez Draw.io i jako referencja dla SVG
-            self.device_styles_drawio_ref: StyleInfo = _extract_styles_from_template(self.template_path)
-        except FileNotFoundError:
-            logger.error(
-                f"Nie znaleziono pliku szablonu '{self.template_path}' do wczytania stylów. Używanie stylów domyślnych.")
-            self.device_styles_drawio_ref = StyleInfo()
-        except Exception as e:
-            logger.error(
-                f"Nieoczekiwany błąd wczytywania stylów z '{self.template_path}': {e}. Używanie stylów domyślnych.")
-            self.device_styles_drawio_ref = StyleInfo()
+        self.global_drawio_diagram_root_cell: Optional[ET.Element] = None
+        if self.drawio_xml_generator:
+            # Użyj poprawnej nazwy metody z drawio_base.py
+            self.global_drawio_diagram_root_cell = self.drawio_xml_generator.get_root_cell_element()
 
-        # Inicjalizacja dla SVG
-        # Wymiary SVG zostaną zaktualizowane po obliczeniu layoutu
+        try:
+            self.device_styles_drawio_ref: DrawioStyleInfo = drawio_device_builder._extract_styles_from_template(
+                self.template_path)
+            logger.info(f"Pomyślnie wczytano/ustawiono style Draw.io z szablonu '{self.template_path}'.")
+        except FileNotFoundError:
+            logger.warning(f"Nie znaleziono pliku szablonu '{self.template_path}'. Używanie domyślnych stylów Draw.io.")
+            self.device_styles_drawio_ref = DrawioStyleInfo()
+        except Exception as e_style:
+            logger.error(
+                f"Nieoczekiwany błąd wczytywania stylów Draw.io z '{self.template_path}': {e_style}. Używanie domyślnych.",
+                exc_info=True)
+            self.device_styles_drawio_ref = DrawioStyleInfo()
+
         self.svg_diagram_obj: Optional[svg_generator.SVGDiagram] = svg_generator.SVGDiagram()
+        logger.debug("DiagramGenerator zainicjalizowany.")
 
     def generate_diagram(self) -> None:
-        """Główna metoda uruchamiająca proces generowania diagramów."""
-        logger.info(f"[Diagram 1/4] Wczytywanie listy urządzeń z {self.ip_list_path}...")
+        logger.info(f"[Diagram 1/4] Wczytywanie listy urządzeń docelowych z {self.ip_list_path}...")
         target_ips_or_hosts = file_io.load_ip_list(self.ip_list_path)
         if not target_ips_or_hosts:
-            logger.warning("Brak urządzeń na liście. Diagramy nie zostaną wygenerowane.")
+            logger.warning("Lista urządzeń docelowych jest pusta. Diagramy nie zostaną wygenerowane.")
+            self._save_diagrams_if_needed(empty=True)
             return
 
-        logger.info("[Diagram 2/4] Pobieranie listy urządzeń z API...")
-        self.all_devices_from_api = self.api_client.get_devices(columns="device_id,hostname,ip,sysName,purpose")
+        logger.info("[Diagram 2/4] Pobieranie pełnej listy wszystkich urządzeń z API LibreNMS...")
+        self.all_devices_from_api = self.api_client.get_devices(
+            columns="device_id,hostname,ip,sysName,purpose,os,hardware,version,serial,type,status"
+        )
         if not self.all_devices_from_api:
-            logger.error("Nie udało się pobrać listy urządzeń z API. Diagramy nie zostaną wygenerowane.")
+            logger.error(
+                "Nie udało się pobrać listy urządzeń z API lub lista jest pusta. Diagramy nie zostaną wygenerowane.")
+            self._save_diagrams_if_needed(empty=True)
             return
+        logger.info(f"Pobrano informacje o {len(self.all_devices_from_api)} urządzeniach z API.")
 
-        logger.info("[Diagram 3/4] Identyfikacja urządzeń docelowych i obliczanie layoutu...")
-        max_diag_width, max_diag_height = self._prepare_targets_and_calculate_layout(target_ips_or_hosts)
+        logger.info("[Diagram 3/4] Identyfikacja urządzeń docelowych, przygotowanie danych i obliczanie layoutu...")
+        max_diag_width, max_diag_height = self._prepare_targets_and_add_devices_to_diagrams(target_ips_or_hosts)
+
+        final_diagram_width = max_diag_width + (
+                    drawio_layout.DEFAULT_MARGIN_X or 200) * 1.5  # Większy margines całkowity
+        final_diagram_height = max_diag_height + (drawio_layout.DEFAULT_MARGIN_Y or 200) * 1.5
 
         if self.svg_diagram_obj:
-            # Ustaw ostateczne wymiary dla płótna SVG na podstawie obliczonego layoutu
-            # Dodajemy marginesy, aby obiekty nie były na krawędzi
-            final_svg_width = max_diag_width + drawio_layout.DEFAULT_MARGIN_X * 1.5  # Trochę większy margines
-            final_svg_height = max_diag_height + drawio_layout.DEFAULT_MARGIN_Y * 1.5
-            self.svg_diagram_obj.update_dimensions(final_svg_width, final_svg_height)
-            logger.info(f"Ustawiono wymiary SVG: {final_svg_width:.0f}x{final_svg_height:.0f}")
+            self.svg_diagram_obj.update_dimensions(final_diagram_width, final_diagram_height)
+        if self.drawio_xml_generator:
+            self.drawio_xml_generator.update_page_dimensions(final_diagram_width, final_diagram_height)
 
-        if not self.target_devices_info:
-            logger.warning("Brak urządzeń z listy docelowej do umieszczenia na diagramach.")
-            self._save_diagrams()
+        if not self.target_devices_prepared_data:
+            logger.warning("Brak urządzeń docelowych do umieszczenia na diagramach po filtrowaniu/przygotowaniu.")
+            self._save_diagrams_if_needed()
             return
 
-        logger.info("[Diagram 4/4] Rysowanie połączeń...")
+        self._log_port_mappings_summary()
+        logger.info("[Diagram 4/4] Rysowanie połączeń między urządzeniami...")
         self._draw_all_connections()
+        self._save_diagrams_if_needed()
+        logger.info("✓ Generowanie diagramów zakończone.")
 
-        self._save_diagrams()
+    def _log_port_mappings_summary(self):
+        logger.debug(f"--- Podsumowanie mapowań portów DrawIO ({len(self.port_endpoint_mappings_drawio)} urządzeń) ---")
+        for i, (dev_key, port_map) in enumerate(self.port_endpoint_mappings_drawio.items()):
+            if i < 3:
+                logger.debug(
+                    f"  DrawIO Mapowanie dla '{dev_key}': {len(port_map) if isinstance(port_map, dict) else 'Niepoprawny format'} portów.")
+            elif i == 3:
+                logger.debug("    ... (więcej mapowań DrawIO nie jest logowanych)")
+        logger.debug(f"--- Podsumowanie mapowań portów SVG ({len(self.port_endpoint_mappings_svg)} urządzeń) ---")
+        for i, (dev_key, port_map) in enumerate(self.port_endpoint_mappings_svg.items()):
+            if i < 3:
+                logger.debug(
+                    f"  SVG Mapowanie dla '{dev_key}': {len(port_map) if isinstance(port_map, dict) else 'Niepoprawny format'} portów.")
+            elif i == 3:
+                logger.debug("    ... (więcej mapowań SVG nie jest logowanych)")
 
-    def _prepare_targets_and_calculate_layout(self, target_ips_or_hosts: List[str]) -> Tuple[float, float]:
-        """
-        Filtruje urządzenia, oblicza ich dynamiczne rozmiary,
-        oblicza globalny layout, a następnie dodaje urządzenia do obu diagramów.
-        Zwraca maksymalne potrzebne wymiary diagramu (szerokość, wysokość) bez końcowych marginesów.
-        """
-        logger.info("Krok 3a: Identyfikacja urządzeń docelowych...")
-        target_set = set(str(ip_or_host).lower() for ip_or_host in target_ips_or_hosts)
-        self.target_devices_info = []
-        device_idx_counter = 0  # Unikalny indeks dla ID elementów
-        for device_api_info in self.all_devices_from_api:
-            dev_ip = device_api_info.get('ip');
-            dev_host = device_api_info.get('hostname')
-            dev_sysname = device_api_info.get('sysName');
-            dev_purpose = device_api_info.get('purpose')
-            canonical_id_check = get_canonical_identifier(device_api_info)
-            potential_ids = set(filter(None, [dev_ip, dev_host, dev_sysname, dev_purpose, canonical_id_check]))
-            lowercase_potential_ids = {str(pid).lower() for pid in potential_ids if isinstance(pid, str)}
-            is_target = any(str(pid).lower() in target_set for pid in potential_ids) or \
-                        any(pid_lower in target_set for pid_lower in lowercase_potential_ids)
+    def _prepare_targets_and_add_devices_to_diagrams(self, target_ips_or_hosts: List[str]) -> Tuple[float, float]:
+        logger.info("Krok 3a: Identyfikacja urządzeń docelowych i przygotowywanie danych...")
+        target_set = set(str(ip_or_host).lower().strip() for ip_or_host in target_ips_or_hosts)
+        self.target_devices_prepared_data = []
+        device_render_idx_counter = 0
+        for device_api_info_entry in self.all_devices_from_api:
+            current_canonical_id = get_canonical_identifier(device_api_info_entry)
+            ids_to_check = {str(val).lower().strip() for val in [
+                device_api_info_entry.get('ip'), device_api_info_entry.get('hostname'),
+                device_api_info_entry.get('sysName'), device_api_info_entry.get('purpose'),
+                current_canonical_id] if val}
+            if any(target_id in ids_to_check for target_id in target_set):
+                try:
+                    prepared_data = common_device_logic.prepare_device_display_data(
+                        device_api_info_entry, self.api_client, device_render_idx_counter
+                    )
+                    self.target_devices_prepared_data.append(prepared_data)
+                    device_render_idx_counter += 1
+                except Exception as e_prepare:
+                    logger.error(
+                        f"Błąd podczas przygotowywania danych dla urządzenia {current_canonical_id or device_api_info_entry.get('hostname')}: {e_prepare}",
+                        exc_info=True)
 
-            if is_target:
-                device_idx_counter += 1
-                device_api_info['_internal_index'] = device_idx_counter
-                self.target_devices_info.append(device_api_info)
-                current_id_for_log = canonical_id_check or dev_host or dev_ip or f"ID:{device_api_info.get('device_id')}"
-                logger.debug(f"Znaleziono urządzenie docelowe ({device_idx_counter}): {current_id_for_log}")
-
-        if not self.target_devices_info:
-            logger.warning("Brak urządzeń docelowych po wstępnym filtrowaniu.")
+        if not self.target_devices_prepared_data:
+            logger.warning("Brak urządzeń docelowych po filtrowaniu i przygotowaniu danych.")
             return 0.0, 0.0
+        logger.info(f"Znaleziono i przygotowano dane dla {len(self.target_devices_prepared_data)} urządzeń docelowych.")
 
-        logger.info(f"Znaleziono {len(self.target_devices_info)} urządzeń docelowych do umieszczenia na diagramach.")
-        logger.info("Krok 3b: Obliczanie dynamicznych rozmiarów dla każdego urządzenia...")
-        calculated_sizes: List[Tuple[float, float]] = []
-        max_item_width = 0.0
-        max_item_height = 0.0
-        size_calculator = calculate_dynamic_device_size  # Z drawio_device_builder
-
-        for i, device_info in enumerate(self.target_devices_info):
-            current_id_for_log = get_canonical_identifier(device_info) or f"Index {i}"
-            logger.debug(f"Obliczanie rozmiaru dla {current_id_for_log}...")
-            try:
-                width, height = size_calculator(device_info, self.api_client)
-                calculated_sizes.append((width, height))
-                max_item_width = max(max_item_width, width)
-                max_item_height = max(max_item_height, height)
-                logger.debug(f"Obliczony rozmiar dla {current_id_for_log}: {width}x{height}")
-            except Exception as e:
-                min_w_fallback = drawio_device_builder.MIN_CHASSIS_WIDTH
-                min_h_fallback = drawio_device_builder.MIN_CHASSIS_HEIGHT
-                logger.error(
-                    f"Błąd podczas obliczania rozmiaru dla {current_id_for_log}: {e}. Używam {min_w_fallback}x{min_h_fallback}.")
-                calculated_sizes.append((min_w_fallback, min_h_fallback))
-                max_item_width = max(max_item_width, min_w_fallback)
-                max_item_height = max(max_item_height, min_h_fallback)
+        logger.info("Krok 3b: Określanie maksymalnych wymiarów elementów dla layoutu...")
+        max_item_width, max_item_height = 0.0, 0.0
+        for prep_data in self.target_devices_prepared_data:
+            w, h = common_device_logic.get_device_render_size_from_prepared_data(prep_data)
+            max_item_width, max_item_height = max(max_item_width, w), max(max_item_height, h)
+        logger.info(f"Maksymalne wymiary elementu dla layoutu: {max_item_width:.0f}x{max_item_height:.0f}")
 
         logger.info(
-            f"Krok 3c: Obliczanie globalnego układu siatki (max wymiary elementu: {max_item_width:.0f}x{max_item_height:.0f})...")
+            f"Krok 3c: Obliczanie globalnego układu siatki dla {len(self.target_devices_prepared_data)} urządzeń...")
+        effective_item_width_for_layout = max_item_width + svg_generator.SVG_INFO_LABEL_MIN_WIDTH + svg_generator.SVG_INFO_LABEL_MARGIN_FROM_CHASSIS
         layout_positions = drawio_layout.calculate_grid_layout(
-            len(self.target_devices_info), max_item_width, max_item_height
+            num_items=len(self.target_devices_prepared_data),
+            item_width=effective_item_width_for_layout, item_height=max_item_height,
+            items_per_row=self.config.get("devices_per_row", drawio_layout.DEFAULT_DEVICES_PER_ROW),
+            margin_x=drawio_layout.DEFAULT_MARGIN_X, margin_y=drawio_layout.DEFAULT_MARGIN_Y,
+            start_offset_x=(drawio_layout.DEFAULT_MARGIN_X or 200) / 2,
+            start_offset_y=(drawio_layout.DEFAULT_MARGIN_Y or 200) / 2
         )
-
-        total_diagram_width_content = 0
-        total_diagram_height_content = 0
-        if layout_positions:
-            for i, (lx, ly) in enumerate(layout_positions):
-                item_w, item_h = calculated_sizes[i]
-                total_diagram_width_content = max(total_diagram_width_content, lx + item_w)
-                total_diagram_height_content = max(total_diagram_height_content, ly + item_h)
+        if not layout_positions:
+            logger.error("Nie udało się obliczyć pozycji layoutu dla urządzeń.")
+            return 0.0, 0.0
 
         logger.info("Krok 3d: Dodawanie urządzeń do diagramów...")
-        self.port_mappings = {}  # Resetuj/Inicjalizuj mapowania
-        for i, device_info in enumerate(self.target_devices_info):
-            current_id_for_log = get_canonical_identifier(device_info) or f"Index {i}"
-            device_internal_idx = device_info.get('_internal_index', i + 1)
-            current_position = layout_positions[i]
+        self.port_endpoint_mappings_drawio.clear()
+        self.port_endpoint_mappings_svg.clear()
+        actual_max_x_content, actual_max_y_content = 0.0, 0.0
+
+        for i, prep_data_item in enumerate(self.target_devices_prepared_data):
+            base_pos_x, base_pos_y = layout_positions[i]
+            # Przesunięcie dla etykiety info po lewej
+            chassis_draw_pos_x = base_pos_x + svg_generator.SVG_INFO_LABEL_MIN_WIDTH + svg_generator.SVG_INFO_LABEL_MARGIN_FROM_CHASSIS
+            final_position_for_device = (chassis_draw_pos_x, base_pos_y)
+            item_canonical_id = prep_data_item.canonical_identifier
             logger.info(
-                f"-- Dodawanie urządzenia {i + 1}/{len(self.target_devices_info)}: {current_id_for_log} na pozycji {current_position} --")
+                f"-- Dodawanie urządzenia {i + 1}/{len(self.target_devices_prepared_data)}: {item_canonical_id} na poz. ({final_position_for_device[0]:.0f}, {final_position_for_device[1]:.0f}) --")
 
-            port_map_data_for_device: Optional[Dict[Any, PortEndpointData]] = None
-
-            # Generowanie dla Draw.io
-            if self.global_drawio_root_cell is not None:
-                logger.debug(f"  Rysowanie dla Draw.io: {current_id_for_log}")
-                port_map_data_for_device = add_device_to_drawio_diagram(
-                    global_root_cell=self.global_drawio_root_cell,
-                    device_info=device_info, api_client=self.api_client,
-                    position=current_position, device_index=device_internal_idx,
-                    styles=self.device_styles_drawio_ref
+            if self.global_drawio_diagram_root_cell is not None:
+                logger.debug(f"  Rysowanie dla Draw.io: {item_canonical_id}")
+                port_map_drawio = drawio_device_builder.add_device_to_diagram(
+                    self.global_drawio_diagram_root_cell, prep_data_item.device_api_info,
+                    self.api_client, final_position_for_device, i, self.device_styles_drawio_ref
                 )
-                # Wypełnij self.port_mappings danymi z Draw.io.
-                # SVG będzie polegać na tych samych globalnych koordynatach z PortEndpointData.
-                if port_map_data_for_device:
-                    dev_ip = device_info.get('ip');
-                    dev_host = device_info.get('hostname')
-                    dev_sysname = device_info.get('sysName');
-                    dev_purpose = device_info.get('purpose')
-                    canonical_id = get_canonical_identifier(device_info)
-                    ids_to_map = set(filter(None, [dev_ip, dev_host, dev_sysname, dev_purpose, canonical_id]))
-                    lowercase_ids = {str(ident).lower() for ident in ids_to_map if isinstance(ident, str)}
-                    ids_to_map.update(lowercase_ids)
-                    for identifier in ids_to_map:
-                        if identifier:
-                            self.port_mappings[identifier] = port_map_data_for_device
-                    logger.info(f"  Draw.io: Zmapowano porty dla {current_id_for_log}")
+                if port_map_drawio:
+                    self.port_endpoint_mappings_drawio[item_canonical_id.lower()] = port_map_drawio
+                else:
+                    logger.warning(f"  Draw.io: Nie uzyskano mapy portów dla '{item_canonical_id}'.")
 
-            # Generowanie dla SVG
             if self.svg_diagram_obj is not None:
-                logger.debug(f"  Rysowanie dla SVG: {current_id_for_log}")
-                # svg_add_device_to_diagram również zwraca mapę portów, ale jeśli
-                # self.port_mappings jest już wypełnione przez Draw.io, i PortEndpointData
-                # zawiera globalne x,y, to nie musimy jej nadpisywać, chyba że SVG potrzebuje
-                # innych cell_id lub specyficznych danych. Na razie zakładamy, że SVG może
-                # używać tej samej mapy do resolwowania połączeń.
-                _ = svg_generator.svg_add_device_to_diagram(  # Zignoruj zwróconą mapę SVG na razie
-                    svg_diagram=self.svg_diagram_obj,
-                    device_info=device_info, api_client=self.api_client,
-                    position=current_position, device_index=device_internal_idx,
-                    drawio_styles_ref=self.device_styles_drawio_ref
+                logger.debug(f"  Rysowanie dla SVG: {item_canonical_id}")
+                port_map_svg = svg_generator.svg_add_device_to_diagram(
+                    self.svg_diagram_obj, prep_data_item.device_api_info,
+                    self.api_client, final_position_for_device, i, self.device_styles_drawio_ref
                 )
-                logger.info(f"  SVG: Narysowano urządzenie {current_id_for_log}")
+                if port_map_svg:
+                    self.port_endpoint_mappings_svg[item_canonical_id.lower()] = port_map_svg
+                else:
+                    logger.warning(f"  SVG: Nie uzyskano mapy portów dla '{item_canonical_id}'.")
 
-        return total_diagram_width_content, total_diagram_height_content
+            current_item_w, current_item_h = common_device_logic.get_device_render_size_from_prepared_data(
+                prep_data_item)
+            # Max X to pozycja X + szerokość chassis + szerokość mgmt0 (jeśli jest) + odstęp
+            # Max Y to pozycja Y + wysokość chassis
+            # Etykieta info jest na lewo od final_position_for_device[0]
+            # Prawidłowe max_x_content to po prostu X najbardziej wysuniętego na prawo elementu
+            # (czyli base_pos_x + effective_item_width_for_layout)
+            actual_max_x_content = max(actual_max_x_content, base_pos_x + effective_item_width_for_layout)
+            actual_max_y_content = max(actual_max_y_content, base_pos_y + max_item_height)
+
+        return actual_max_x_content, actual_max_y_content
+
+    def _find_port_map_for_connection(
+            self, device_identifier_from_conn: Any,
+            port_mappings_dict: Dict[str, Dict[Any, PortEndpointData]],
+            side_for_log: str, missing_devices_log_tracker: Set[str]
+    ) -> Optional[Dict[Any, PortEndpointData]]:
+        if not device_identifier_from_conn: return None
+        dev_id_str_lower = str(device_identifier_from_conn).lower().strip()  # Klucze w mapowaniach są już lowercase
+        if not dev_id_str_lower:
+            logger.warning(f"    _find_port_map: Pusty identyfikator urządzenia ({side_for_log}).")
+            return None
+        logger.debug(f"    _find_port_map ({side_for_log}): Szukam mapy dla '{dev_id_str_lower}'.")
+        port_map_for_device = port_mappings_dict.get(dev_id_str_lower)
+        if port_map_for_device is None:
+            if dev_id_str_lower not in missing_devices_log_tracker:
+                logger.warning(
+                    f"    _find_port_map: Mapa portów dla '{dev_id_str_lower}' ({side_for_log}) NIE ZNALEZIONA.")
+                missing_devices_log_tracker.add(dev_id_str_lower)
+            return None
+        logger.debug(
+            f"      _find_port_map: Znaleziono mapę dla '{dev_id_str_lower}' ({side_for_log}) z {len(port_map_for_device)} portami.")
+        return port_map_for_device
+
+    def _find_endpoint_data_in_map(
+            self, port_map_of_device: Dict[Any, PortEndpointData],
+            port_name_from_conn: Optional[str], port_ifindex_from_conn: Optional[Any],
+            device_name_for_log: str, side_for_log: str
+    ) -> Optional[PortEndpointData]:
+        # ... (kod funkcji z poprzedniej odpowiedzi, bez zmian, używa loggera) ...
+        endpoint_data: Optional[PortEndpointData] = None;
+        keys_attempted_log: List[str] = []
+        if port_ifindex_from_conn is not None:
+            key_ifidx_str = f"ifindex_{port_ifindex_from_conn}"
+            keys_attempted_log.append(f"ifIndex:'{key_ifidx_str}'")
+            endpoint_data = port_map_of_device.get(key_ifidx_str)
+            if endpoint_data: logger.debug(
+                f"      _find_endpoint_data ({side_for_log}): Znaleziono dla '{device_name_for_log}':'{port_name_from_conn or key_ifidx_str}' przez '{key_ifidx_str}'."); return endpoint_data
+        if port_name_from_conn:
+            port_name_conn_str = str(port_name_from_conn).strip()
+            port_name_conn_lower = port_name_conn_str.lower()
+            keys_attempted_log.append(f"name_lower:'{port_name_conn_lower}'")
+            endpoint_data = port_map_of_device.get(port_name_conn_lower)
+            if endpoint_data: logger.debug(
+                f"      _find_endpoint_data ({side_for_log}): Znaleziono dla '{device_name_for_log}':'{port_name_conn_str}' przez '{port_name_conn_lower}'."); return endpoint_data
+            normalized_port_name = cli_utils._normalize_interface_name(
+                port_name_conn_str).lower()  # Użyj _normalize_interface_name z cli_utils
+            if normalized_port_name != port_name_conn_lower:
+                keys_attempted_log.append(f"normalized_name:'{normalized_port_name}'")
+                endpoint_data = port_map_of_device.get(normalized_port_name)
+                if endpoint_data: logger.debug(
+                    f"      _find_endpoint_data ({side_for_log}): Znaleziono dla '{device_name_for_log}':'{port_name_conn_str}' przez normalizację do '{normalized_port_name}'."); return endpoint_data
+        if port_name_from_conn and str(port_name_from_conn).strip().isdigit():
+            visual_num_key = str(port_name_from_conn).strip()
+            keys_attempted_log.append(f"visual_num:'{visual_num_key}'")
+            endpoint_data = port_map_of_device.get(visual_num_key)
+            if endpoint_data: logger.debug(
+                f"      _find_endpoint_data ({side_for_log}): Znaleziono dla '{device_name_for_log}':'{port_name_from_conn}' przez numer wizualny '{visual_num_key}'."); return endpoint_data
+        logger.warning(
+            f"      _find_endpoint_data ({side_for_log}): NIE znaleziono punktu dla portu '{port_name_from_conn}' (ifIndex: {port_ifindex_from_conn}) na '{device_name_for_log}'. Próbowano: {keys_attempted_log}. Dostępne (max 5): {list(port_map_of_device.keys())[:5]}")
+        return None
+
+    def _log_missing_port_data(self, conn_idx: int, conn_details: Dict[str, Any],
+                               src_data: Optional[PortEndpointData], tgt_data: Optional[PortEndpointData],
+                               logged_missing_ports_tracker: Set[str], diagram_type: str) -> None:
+        # ... (kod funkcji z poprzedniej odpowiedzi, bez zmian) ...
+        local_port_id_log = f"{conn_details.get('local_device')}:{conn_details.get('local_port')}"
+        remote_port_id_log = f"{conn_details.get('remote_device')}:{conn_details.get('remote_port')}"
+        missing_parts_msgs = []
+        if not src_data: missing_parts_msgs.append(
+            f"źródła '{conn_details.get('local_port')}' (ifIndex: {conn_details.get('local_ifindex')}) na '{conn_details.get('local_device')}'")
+        if not tgt_data: missing_parts_msgs.append(
+            f"celu '{conn_details.get('remote_port')}' (ifIndex: {conn_details.get('remote_ifindex')}) na '{conn_details.get('remote_device')}'")
+        if missing_parts_msgs:
+            log_key_src = f"{diagram_type}_{local_port_id_log}";
+            log_key_tgt = f"{diagram_type}_{remote_port_id_log}";
+            should_log_warning = False
+            if not src_data and log_key_src not in logged_missing_ports_tracker: logged_missing_ports_tracker.add(
+                log_key_src); should_log_warning = True
+            if not tgt_data and log_key_tgt not in logged_missing_ports_tracker: logged_missing_ports_tracker.add(
+                log_key_tgt); should_log_warning = True
+            msg_detail = f"({diagram_type}) [Połączenie #{conn_idx}]: NIE zostanie narysowane - problem z mapowaniem dla portu {' ORAZ '.join(missing_parts_msgs)}."
+            if should_log_warning:
+                logger.warning(msg_detail)
+            else:
+                logger.debug(msg_detail + " (Ostrzeżenie już zalogowano)")
+
+    def _calculate_waypoint(self, x: float, y: float, orientation: str, offset_val: float) -> Tuple[float, float]:
+        # ... (kod funkcji z poprzedniej odpowiedzi, bez zmian) ...
+        # Używa common_device_logic.WAYPOINT_OFFSET jeśli offset_val nie jest podany,
+        # ale tutaj offset_val jest zawsze przekazywany.
+        wp_x_calc, wp_y_calc = x, y;
+        actual_offset = offset_val
+        if orientation == "up":
+            wp_y_calc -= actual_offset
+        elif orientation == "down":
+            wp_y_calc += actual_offset
+        elif orientation == "left":
+            wp_x_calc -= actual_offset
+        elif orientation == "right":
+            wp_x_calc += actual_offset
+        return wp_x_calc, wp_y_calc
 
     def _draw_all_connections(self) -> None:
+        # ... (kod funkcji z poprzedniej odpowiedzi, z drobnymi poprawkami logowania i użyciem WAYPOINT_OFFSET z common_device_logic) ...
         connections_data = file_io.load_connections_json(self.connections_json_path)
         if not connections_data:
             logger.warning(f"Brak danych o połączeniach w {self.connections_json_path}. Linie nie zostaną narysowane.")
             return
+        logger.info(f"Próba narysowania {len(connections_data)} połączeń z pliku JSON...")
+        drawn_links_set_drawio: Set[frozenset[str]] = set();
+        drawn_links_set_svg: Set[frozenset[str]] = set()
+        missing_devices_logged_drawio: Set[str] = set();
+        missing_ports_logged_drawio: Set[str] = set()
+        missing_devices_logged_svg: Set[str] = set();
+        missing_ports_logged_svg: Set[str] = set()
+        connection_drawn_count = 0;
+        connections_processed_count = 0
+        connections_skipped_incomplete = 0;
+        connections_skipped_no_local_map = 0;
+        connections_skipped_no_remote_map = 0
+        connections_skipped_no_source_ep = 0;
+        connections_skipped_no_target_ep = 0;
+        connections_skipped_already_drawn = 0
 
-        logger.info(f"Rysowanie {len(connections_data)} połączeń...")
-        connection_count = 0
-        drawn_links_set: Set[frozenset] = set()  # Wspólny set dla obu formatów, klucz na ID portów/endpointów
-        missing_devices_log_set: Set[str] = set()
-        missing_ports_log_set: Set[str] = set()
-
-        for i, conn in enumerate(connections_data):
-            local_dev = conn.get("local_device");
-            local_port_name = conn.get("local_port")
-            remote_dev = conn.get("remote_device");
-            remote_port_name = conn.get("remote_port")
-            vlan = conn.get("vlan");  # via = conn.get("discovery_method", "?")
-            local_ifindex = conn.get("local_ifindex")
-            remote_ifindex = conn.get("remote_ifindex")
-
-            if not all([local_dev, local_port_name, remote_dev, remote_port_name]): continue
-
-            local_map_dev = self._find_port_map(local_dev, conn, "local", missing_devices_log_set)
-            remote_map_dev = self._find_port_map(remote_dev, conn, "remote", missing_devices_log_set)
-            if not local_map_dev or not remote_map_dev: continue
-
-            source_data = self._find_endpoint_data(local_map_dev, local_port_name, local_ifindex, str(local_dev),
-                                                   "źródła")
-            target_data = self._find_endpoint_data(remote_map_dev, remote_port_name, remote_ifindex, str(remote_dev),
-                                                   "celu")
-
-            if not source_data or not target_data:
-                self._log_missing_port_data(i, conn, source_data, target_data, missing_ports_log_set)
+        for i, conn_details in enumerate(connections_data):
+            connections_processed_count += 1
+            logger.debug(f"\n--- DiagramGen: Przetwarzanie połączenia #{i + 1}/{len(connections_data)} ---")
+            logger.debug(f"  Surowe dane połączenia: {pprint.pformat(conn_details)}")
+            local_dev_id, lp_name, lp_ifidx = conn_details.get("local_device"), conn_details.get(
+                "local_port"), conn_details.get("local_ifindex")
+            remote_dev_id, rp_name, rp_ifidx = conn_details.get("remote_device"), conn_details.get(
+                "remote_port"), conn_details.get("remote_ifindex")
+            vlan_val = conn_details.get("vlan")
+            if not all([local_dev_id, lp_name, remote_dev_id, rp_name]):
+                connections_skipped_incomplete += 1;
+                logger.debug(f"  SKIP Połączenie #{i + 1}: Brakujące kluczowe pola.");
                 continue
 
-            # Używamy cell_id z PortEndpointData jako części klucza unikalności.
-            # Dla Draw.io to ID komórki endpointu, dla SVG może to być ID portu.
-            # Zakładamy, że są one wystarczająco unikalne.
-            link_key = frozenset(sorted((str(source_data.cell_id), str(target_data.cell_id))))
-            if link_key in drawn_links_set:
-                logger.debug(f"Conn #{i}: Pomijam - link {link_key} już narysowany w jednym z formatów.")
-                continue
+            # Draw.io
+            if self.global_drawio_diagram_root_cell is not None:
+                local_map_d = self._find_port_map_for_connection(local_dev_id, self.port_endpoint_mappings_drawio,
+                                                                 "L(DrawIO)", missing_devices_logged_drawio)
+                remote_map_d = self._find_port_map_for_connection(remote_dev_id, self.port_endpoint_mappings_drawio,
+                                                                  "R(DrawIO)", missing_devices_logged_drawio)
+                if not local_map_d: connections_skipped_no_local_map += 1
+                if not remote_map_d: connections_skipped_no_remote_map += 1
+                if local_map_d and remote_map_d:
+                    src_ep_d = self._find_endpoint_data_in_map(local_map_d, lp_name, lp_ifidx, str(local_dev_id),
+                                                               "Src(DrawIO)")
+                    tgt_ep_d = self._find_endpoint_data_in_map(remote_map_d, rp_name, rp_ifidx, str(remote_dev_id),
+                                                               "Tgt(DrawIO)")
+                    if not src_ep_d: connections_skipped_no_source_ep += 1
+                    if not tgt_ep_d: connections_skipped_no_target_ep += 1
+                    if src_ep_d and tgt_ep_d:
+                        link_key_d = frozenset(sorted((str(src_ep_d.cell_id), str(tgt_ep_d.cell_id))))
+                        if link_key_d not in drawn_links_set_drawio:
+                            wp_s_x, wp_s_y = self._calculate_waypoint(src_ep_d.x, src_ep_d.y, src_ep_d.orientation,
+                                                                      common_device_logic.WAYPOINT_OFFSET)
+                            wp_t_x, wp_t_y = self._calculate_waypoint(tgt_ep_d.x, tgt_ep_d.y, tgt_ep_d.orientation,
+                                                                      common_device_logic.WAYPOINT_OFFSET)
+                            edge_id = f"edge_d_{i + 1}_{src_ep_d.cell_id}_{tgt_ep_d.cell_id}"
+                            edge_style = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.5;endArrow=none;strokeColor=#FF9900;fontSize=8;"
+                            edge_label = f"VLAN {vlan_val}" if vlan_val is not None else ""
+                            edge_cell = drawio_utils.create_edge_cell(edge_id, "1", src_ep_d.cell_id, tgt_ep_d.cell_id,
+                                                                      edge_style, edge_label)
+                            geom = edge_cell.find("./mxGeometry");
+                            if geom is not None:
+                                pts_arr = ET.SubElement(geom, "Array", {"as": "points"})
+                                ET.SubElement(pts_arr, "mxPoint", {"x": str(wp_s_x), "y": str(wp_s_y)})
+                                ET.SubElement(pts_arr, "mxPoint", {"x": str(wp_t_x), "y": str(wp_t_y)})
+                            if edge_label: drawio_utils.apply_style_change(edge_cell, "labelBackgroundColor",
+                                                                           "#FFFFFF"); drawio_utils.apply_style_change(
+                                edge_cell, "fontColor", "#000000")
+                            self.global_drawio_diagram_root_cell.append(edge_cell)
+                            drawn_links_set_drawio.add(link_key_d);
+                            connection_drawn_count += 1
+                            logger.debug(f"    DrawIO: Narysowano {link_key_d}.")
+                        else:
+                            connections_skipped_already_drawn += 1; logger.debug(
+                                f"    DrawIO: Link {link_key_d} już narysowany.")
+                    else:
+                        self._log_missing_port_data(i + 1, conn_details, src_ep_d, tgt_ep_d,
+                                                    missing_ports_logged_drawio, "DrawIO")
 
-            drawn_this_iteration = False
-            # Rysowanie dla Draw.io
-            if self.global_drawio_root_cell is not None:
-                wp_source_x, wp_source_y = self._calculate_waypoint(source_data.x, source_data.y,
-                                                                    source_data.orientation, DRAWIO_WAYPOINT_OFFSET)
-                wp_target_x, wp_target_y = self._calculate_waypoint(target_data.x, target_data.y,
-                                                                    target_data.orientation, DRAWIO_WAYPOINT_OFFSET)
-                waypoints_drawio = [(wp_source_x, wp_source_y), (wp_target_x, wp_target_y)]
-
-                edge_id_drawio = f"conn_edge_drawio_{i}_{source_data.cell_id}_{target_data.cell_id}"
-                edge_style_drawio = "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;html=1;strokeWidth=1.5;endArrow=none;strokeColor=#FF9900;fontSize=8;"
-                edge_label_drawio = f"VLAN {vlan}" if vlan is not None else ""
-
-                edge_cell_drawio = drawio_utils.create_floating_edge_cell(
-                    edge_id=edge_id_drawio, parent_id="1", style=edge_style_drawio,
-                    source_point=(source_data.x, source_data.y), target_point=(target_data.x, target_data.y),
-                    waypoints=waypoints_drawio
-                )
-                if edge_label_drawio:
-                    edge_cell_drawio.set("value", edge_label_drawio)
-                    drawio_utils.apply_style_change(edge_cell_drawio, "labelBackgroundColor", "#FFFFFF")
-                    drawio_utils.apply_style_change(edge_cell_drawio, "fontColor", "#000000")
-                self.global_drawio_root_cell.append(edge_cell_drawio)
-                drawn_this_iteration = True
-
-            # Rysowanie dla SVG
+            # SVG
             if self.svg_diagram_obj is not None:
-                svg_generator.svg_draw_connection(
-                    svg_diagram=self.svg_diagram_obj,
-                    source_endpoint_data=source_data,
-                    target_endpoint_data=target_data,
-                    vlan_id_str=vlan,
-                    connection_idx=i
-                )
-                drawn_this_iteration = True
+                local_map_s = self._find_port_map_for_connection(local_dev_id, self.port_endpoint_mappings_svg,
+                                                                 "L(SVG)", missing_devices_logged_svg)
+                remote_map_s = self._find_port_map_for_connection(remote_dev_id, self.port_endpoint_mappings_svg,
+                                                                  "R(SVG)", missing_devices_logged_svg)
+                if local_map_s and remote_map_s:
+                    src_ep_s = self._find_endpoint_data_in_map(local_map_s, lp_name, lp_ifidx, str(local_dev_id),
+                                                               "Src(SVG)")
+                    tgt_ep_s = self._find_endpoint_data_in_map(remote_map_s, rp_name, rp_ifidx, str(remote_dev_id),
+                                                               "Tgt(SVG)")
+                    if src_ep_s and tgt_ep_s:
+                        link_key_s = frozenset(sorted((str(src_ep_s.cell_id), str(tgt_ep_s.cell_id))))
+                        if link_key_s not in drawn_links_set_svg:
+                            svg_generator.svg_draw_connection(self.svg_diagram_obj, src_ep_s, tgt_ep_s,
+                                                              str(vlan_val) if vlan_val is not None else None, i + 1)
+                            drawn_links_set_svg.add(link_key_s)
+                            if link_key_d not in drawn_links_set_drawio: connection_drawn_count += 1  # Zlicz jeśli nie w DrawIO
+                            logger.debug(f"    SVG: Narysowano {link_key_s}.")
+                        # else: (pominięcie już zalogowane dla DrawIO jeśli klucze są te same)
+                    else:
+                        self._log_missing_port_data(i + 1, conn_details, src_ep_s, tgt_ep_s, missing_ports_logged_svg,
+                                                    "SVG")
 
-            if drawn_this_iteration:
-                drawn_links_set.add(link_key)
-                connection_count += 1
-
+        logger.info(f"--- Podsumowanie _draw_all_connections ---")
+        logger.info(f"  Przetworzono połączeń: {connections_processed_count} / {len(connections_data)}")
         logger.info(
-            f"\n✓ Zakończono rysowanie połączeń. Narysowano (lub próbowano) {connection_count} unikalnych linii.")
+            f"  Pominięto: niekompletne: {connections_skipped_incomplete}, brak mapy lokalnej: {connections_skipped_no_local_map}, "
+            f"brak mapy zdalnej: {connections_skipped_no_remote_map}, brak źródłowego EP: {connections_skipped_no_source_ep}, "
+            f"brak docelowego EP: {connections_skipped_no_target_ep}, już narysowane: {connections_skipped_already_drawn}")
+        logger.info(f"✓ Zakończono rysowanie połączeń. Narysowano unikalnych linii: {connection_drawn_count}")
 
-    def _find_port_map(self, device_identifier: Any, conn: Dict, side: str, missing_devices_logged: Set) -> Optional[
-        Dict[Any, PortEndpointData]]:
-        port_map = self.port_mappings.get(device_identifier)
-        if port_map is None and isinstance(device_identifier, str):
-            port_map = self.port_mappings.get(device_identifier.lower())
-
-        if port_map is None:
-            if device_identifier not in missing_devices_logged:
-                alt_ids_to_check = [conn.get(f"{side}_device_ip"), conn.get(f"{side}_device_hostname"),
-                                    conn.get(f"{side}_device_purpose")]
-                is_on_diagram = any(
-                    alt_id in self.port_mappings or (isinstance(alt_id, str) and alt_id.lower() in self.port_mappings)
-                    for alt_id in filter(None, alt_ids_to_check)
-                )
-                status_message = "JEST na diagramie pod inną nazwą/IP" if is_on_diagram else "BRAK go na diagramie"
-                logger.info(
-                    f"Urządzenie {side} '{device_identifier}' nie znalezione w aktywnych mapowaniach portów. Status: {status_message}.")
-                missing_devices_logged.add(device_identifier)
-            return None
-        return port_map
-
-    def _find_endpoint_data(self, port_map_for_device: Dict[Any, PortEndpointData], port_name: Optional[str],
-                            ifindex: Optional[Any], device_name_str: str, side_info: str) -> Optional[PortEndpointData]:
-        endpoint_data: Optional[PortEndpointData] = None
-        keys_attempted: List[str] = []
-
-        if ifindex is not None:
-            key_ifidx_str = f"ifindex_{ifindex}"
-            keys_attempted.append(key_ifidx_str)
-            endpoint_data = port_map_for_device.get(key_ifidx_str)
-            if endpoint_data: return endpoint_data
-
-        if port_name:
-            keys_attempted.append(f"name:'{port_name}'")
-            endpoint_data = port_map_for_device.get(port_name)
-            if endpoint_data: return endpoint_data
-
-            if isinstance(port_name, str):
-                port_name_lc = port_name.lower()
-                if port_name_lc != port_name:  # Only if different
-                    keys_attempted.append(f"name_lc:'{port_name_lc}'")
-                    endpoint_data = port_map_for_device.get(port_name_lc)
-                    if endpoint_data: return endpoint_data
-
-        # Fallback na numer wizualny, jeśli port_name wygląda jak numer
-        visual_number_key: Optional[str] = None
-        if port_name and isinstance(port_name, str):
-            if port_name.isdigit():
-                visual_number_key = port_name
-            else:  # Spróbuj wyciągnąć numer z końca nazwy portu, np. "Port 1" -> "1"
-                num_match = re.search(r'(\d+)$', port_name)
-                if num_match: visual_number_key = num_match.group(1)
-
-        if visual_number_key:
-            keys_attempted.append(f"vis_num:'{visual_number_key}'")
-            endpoint_data = port_map_for_device.get(visual_number_key)
-            if endpoint_data: return endpoint_data
-
-        logger.debug(
-            f"Nie znaleziono punktu końcowego dla portu '{port_name}' (ifIndex: {ifindex}) na urządzeniu '{device_name_str}' ({side_info}). Próbowano kluczy: {keys_attempted}")
-        return None
-
-    def _log_missing_port_data(self, conn_idx: int, conn_details: Dict, src_data: Optional[PortEndpointData],
-                               tgt_data: Optional[PortEndpointData], logged_missing_ports: Set) -> None:
-        local_port_id = f"{conn_details.get('local_device')}:{conn_details.get('local_port')}"
-        remote_port_id = f"{conn_details.get('remote_device')}:{conn_details.get('remote_port')}"
-        missing_parts_msgs = []
-        if not src_data: missing_parts_msgs.append(
-            f"źródła '{conn_details.get('local_port')}' na '{conn_details.get('local_device')}'")
-        if not tgt_data: missing_parts_msgs.append(
-            f"celu '{conn_details.get('remote_port')}' na '{conn_details.get('remote_device')}'")
-
-        if missing_parts_msgs:
-            log_this_time = (not src_data and local_port_id not in logged_missing_ports) or \
-                            (not tgt_data and remote_port_id not in logged_missing_ports)
-            if log_this_time:
-                logger.info(
-                    f"[Połączenie #{conn_idx}]: NIE zostanie narysowane (brak danych dla portu {' ORAZ '.join(missing_parts_msgs)}).")
-                if not src_data: logged_missing_ports.add(local_port_id)
-                if not tgt_data: logged_missing_ports.add(remote_port_id)
-
-    def _calculate_waypoint(self, x: float, y: float, orientation: str, offset_val: float) -> Tuple[float, float]:
-        wp_x_calc, wp_y_calc = x, y
-        if orientation == "up":
-            wp_y_calc -= offset_val
-        elif orientation == "down":
-            wp_y_calc += offset_val
-        elif orientation == "left":
-            wp_x_calc -= offset_val
-        elif orientation == "right":
-            wp_x_calc += offset_val
-        return wp_x_calc, wp_y_calc
-
-    def _save_diagrams(self) -> None:
-        # Zapisz diagram Draw.io
-        if self.drawio_xml_generator:
+    def _save_diagrams_if_needed(self, empty: bool = False) -> None:
+        # ... (kod funkcji z poprzedniej odpowiedzi, bez zmian) ...
+        if self.drawio_xml_generator and self.global_drawio_diagram_root_cell is not None:
+            if empty and hasattr(self.drawio_xml_generator, 'update_page_dimensions'):
+                self.drawio_xml_generator.update_page_dimensions(850, 1100)
             file_io.save_diagram_xml(self.drawio_xml_generator.get_tree(), self.output_path_drawio)
         else:
-            logger.warning("Brak generatora XML Draw.io do zapisania (być może błąd inicjalizacji).")
-
-        # Zapisz diagram SVG
+            logger.warning("Brak generatora XML Draw.io lub korzenia. Plik Draw.io nie zostanie zapisany.")
         if self.svg_diagram_obj:
+            if empty and hasattr(self.svg_diagram_obj, 'update_dimensions'):
+                self.svg_diagram_obj.update_dimensions(850, 1100)
             try:
                 with open(self.output_path_svg, "w", encoding="utf-8") as f:
                     f.write(self.svg_diagram_obj.get_svg_string())
-                logger.info(f"✓ Diagram SVG zapisany jako {self.output_path_svg}")
+                logger.info(f"✓ Diagram SVG {'(pusty)' if empty else ''} zapisany jako {self.output_path_svg}")
             except Exception as e:
-                logger.error(f"⚠ Błąd zapisu diagramu SVG do pliku {self.output_path_svg}: {e}")
+                logger.error(f"⚠ Błąd zapisu diagramu SVG {self.output_path_svg}: {e}", exc_info=True)
         else:
-            logger.warning("Brak obiektu diagramu SVG do zapisania (być może błąd inicjalizacji).")
+            logger.warning("Brak obiektu diagramu SVG. Plik SVG nie zostanie zapisany.")

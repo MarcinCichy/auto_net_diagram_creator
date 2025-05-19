@@ -1,279 +1,321 @@
 # discovery.py
-
-import os, sys
-print(">>> discovery.py sees CWD:", os.getcwd())
-print(">>> discovery.py sees sys.path[0]:", sys.path[0])
-print(">>> files here:", os.listdir(sys.path[0]))
+import os
+import sys  # Usunięte, jeśli nie jest potrzebne do manipulacji ścieżkami
+import logging
+from typing import Callable, List, Dict, Any, Optional, Tuple
 
 from librenms_client import LibreNMSAPI
+
 try:
     import snmp_utils
+
+    SNMP_UTILS_AVAILABLE = True
 except ImportError:
-    print("OSTRZEŻENIE: Moduł snmp_utils.py nie został znaleziony. Funkcje SNMP nie będą działać.")
-    import traceback
+    SNMP_UTILS_AVAILABLE = False
+    logging.getLogger(__name__).warning(  # Użyj loggera przed zdefiniowaniem lokalnego
+        "Moduł snmp_utils.py nie został znaleziony lub nie można go zaimportować. "
+        "Funkcje SNMP nie będą działać. Upewnij się, że pysnmp jest zainstalowane i snmp_utils.py jest w PYTHONPATH."
+    )
 
-    traceback.print_exc()  # TO JEST KLUCZOWE
-    class snmp_utils: # Stub class
-        @staticmethod
-        def snmp_get_lldp_neighbors(h, c): print(f"  SNMP stub: snmp_get_lldp_neighbors({h}, ***)"); return None
-        @staticmethod
-        def snmp_get_cdp_neighbors(h, c): print(f"  SNMP stub: snmp_get_cdp_neighbors({h}, ***)"); return None
-        @staticmethod
-        def snmp_get_bridge_baseport_ifindex(h, c): print(f"  SNMP stub: snmp_get_bridge_baseport_ifindex({h}, ***)"); return None
-        @staticmethod
-        def snmp_get_fdb_entries(h, c): print(f"  SNMP stub: snmp_get_fdb_entries({h}, ***)"); return None
-        @staticmethod
-        def snmp_get_qbridge_fdb(h, c): print(f"  SNMP stub: snmp_get_qbridge_fdb({h}, ***)"); return None
-        @staticmethod
-        def snmp_get_arp_entries(h, c): print(f"  SNMP stub: snmp_get_arp_entries({h}, ***)"); return None
-import cli_utils
-import pprint
 
-def _format_connection(local_host, local_if, neighbor_host, neighbor_if, vlan, via):
+    # Definicja klasy zastępczej (stub)
+    class snmp_utils:  # type: ignore
+        @staticmethod
+        def snmp_get_lldp_neighbors(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[
+            List[Tuple[int, str, str]]]:
+            logging.getLogger(__name__).debug(f"  SNMP STUB: snmp_get_lldp_neighbors({h}, ***)")
+            return None
+
+        @staticmethod
+        def snmp_get_cdp_neighbors(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[
+            List[Tuple[int, str, str]]]:
+            logging.getLogger(__name__).debug(f"  SNMP STUB: snmp_get_cdp_neighbors({h}, ***)")
+            return None
+
+        @staticmethod
+        def snmp_get_bridge_baseport_ifindex(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[
+            Dict[int, int]]:
+            logging.getLogger(__name__).debug(f"  SNMP STUB: snmp_get_bridge_baseport_ifindex({h}, ***)")
+            return None
+
+        @staticmethod
+        def snmp_get_fdb_entries(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[List[Tuple[str, int]]]:
+            logging.getLogger(__name__).debug(f"  SNMP STUB: snmp_get_fdb_entries({h}, ***)")
+            return None
+
+        @staticmethod
+        def snmp_get_qbridge_fdb(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[
+            List[Tuple[str, int, int]]]:
+            logging.getLogger(__name__).debug(f"  SNMP STUB: snmp_get_qbridge_fdb({h}, ***)")
+            return None
+
+        @staticmethod
+        def snmp_get_arp_entries(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[
+            List[Tuple[str, str, int]]]:
+            logging.getLogger(__name__).debug(f"  SNMP STUB: snmp_get_arp_entries({h}, ***)")
+            return None
+
+import cli_utils  # Załóżmy, że jest poprawnie zaimportowany
+import pprint  # Do debugowania, ale lepiej używać logger.debug z pprint.pformat
+
+logger = logging.getLogger(__name__)
+
+
+def _format_connection(local_host: Any, local_if: Any, neighbor_host: Any, neighbor_if: Any, vlan: Any, via: Any) -> \
+Dict[str, Any]:
     """Pomocnicza funkcja do tworzenia spójnego formatu słownika połączenia."""
-    return {
-        "local_host": str(local_host).strip() if local_host else None,
-        "local_if": str(local_if).strip() if local_if else None,
-        "neighbor_host": str(neighbor_host).strip() if neighbor_host else None,
-        "neighbor_if": str(neighbor_if).strip() if neighbor_if else None,
-        "vlan": vlan,
-        "via": str(via).strip() if via else None,
+    conn = {
+        "local_host": str(local_host).strip() if local_host is not None else None,
+        "local_if": str(local_if).strip() if local_if is not None else None,
+        "neighbor_host": str(neighbor_host).strip() if neighbor_host is not None else None,
+        "neighbor_if": str(neighbor_if).strip() if neighbor_if is not None else None,
+        "vlan": vlan,  # vlan może być None lub int/str
+        "via": str(via).strip() if via is not None else None,
     }
+    # Usuń klucze z wartością None, aby nie zaśmiecać JSONa, chyba że None jest znaczące
+    # return {k: v for k, v in conn.items() if v is not None} # To może być zbyt agresywne
+    return conn
 
-# *** ZMODYFIKOWANA FUNKCJA - Iteracja po liście community ***
-def find_via_lldp_cdp_snmp(target_device, communities_to_try, idx2name):
+
+def _try_snmp_operation(
+        host: str,
+        communities: Optional[List[str]],
+        snmp_func: Callable,
+        operation_desc: str,
+        *args: Any  # Dodatkowe argumenty dla snmp_func
+) -> Optional[Any]:
     """
-    Odkrywanie przez LLDP/CDP używając SNMP. Iteruje po liście community.
+    Wykonuje daną operację SNMP, iterując po community.
+    Zwraca wynik pierwszej udanej operacji lub None, jeśli wszystkie zawiodą.
     """
-    if not communities_to_try: return []
+    if not SNMP_UTILS_AVAILABLE:
+        logger.debug(f"  SNMP ({operation_desc}): Moduł snmp_utils niedostępny, pomijam operację dla {host}.")
+        return None
+    if not communities:
+        logger.info(f"  SNMP ({operation_desc}): Brak community do próby dla {host}.")
+        return None
+
+    for i, community_str in enumerate(communities):
+        if not community_str:
+            continue
+        logger.info(f"  SNMP ({operation_desc}): Próba dla {host} z community #{i + 1} ('{community_str}')...")
+        try:
+            # Przekazanie timeout i retries, jeśli funkcja snmp_utils je akceptuje.
+            # Można to zrobić bardziej generycznie z inspect.signature, ale dla uproszczenia:
+            # Załóżmy, że funkcje w snmp_utils mają domyślne timeout/retries.
+            # Jeśli snmp_func wymaga dodatkowych argumentów (np. phys_map), są one w *args.
+            if args:
+                result = snmp_func(host, community_str, *args)  # timeout i retries są w snmp_utils
+            else:
+                result = snmp_func(host, community_str)
+
+            if result is not None:
+                logger.info(f"    ✓ SNMP ({operation_desc}): Odpowiedź z community #{i + 1} dla {host}.")
+                if isinstance(result, (list, dict)):  # Sprawdź, czy to kolekcja, aby zalogować rozmiar
+                    logger.debug(f"    SNMP ({operation_desc}): Otrzymano {len(result)} elementów.")
+                return result
+            else:
+                logger.info(
+                    f"    ⓘ SNMP ({operation_desc}): Brak odpowiedzi/błąd (funkcja zwróciła None) z community #{i + 1} dla {host}.")
+        except Exception as e:
+            logger.error(
+                f"    ⚠ SNMP ({operation_desc}): Niespodziewany błąd podczas wywołania {snmp_func.__name__} z community '{community_str}' dla {host}: {e}",
+                exc_info=True)
+            # Kontynuuj z następnym community
+
+    logger.warning(
+        f"  ⓘ SNMP ({operation_desc}): Nie udało się uzyskać danych dla {host} po próbie wszystkich community.")
+    return None
+
+
+def find_via_lldp_cdp_snmp(target_device: Dict[str, Any], communities_to_try: Optional[List[str]],
+                           idx2name: Dict[int, str]) -> List[Dict[str, Any]]:
     host = target_device.get("hostname") or target_device.get("ip")
     if not host: return []
-    print(f"⟶ SNMP LLDP/CDP dla {host}...")
+    logger.info(f"⟶ SNMP: Próba odkrycia sąsiadów LLDP/CDP dla {host}...")
+    conns: List[Dict[str, Any]] = []
 
-    conns = []
-    # Upewnij się, że communities_to_try jest listą
-    communities = communities_to_try if isinstance(communities_to_try, list) else [communities_to_try]
-    lldp_results = None # Zmienna do przechowania wyników LLDP
-    cdp_results = None  # Zmienna do przechowania wyników CDP
-
-    for i, community in enumerate(communities):
-        if not community: continue
-        print(f"  Próba SNMP z community #{i+1} ('{community}')...")
-
-        # LLDP (próbuj tylko jeśli jeszcze nie mamy wyników)
-        if lldp_results is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_lldp_neighbors(host='{host}', community='{community}')")
-            current_lldp = snmp_utils.snmp_get_lldp_neighbors(host, community)
-            if current_lldp is not None: # Otrzymano odpowiedź (nawet pustą)
-                print(f"    ✓ LLDP SNMP: Odpowiedź z community #{i+1}.")
-                lldp_results = current_lldp # Zapisz wynik i przerwij próby LLDP
-            else:
-                print(f"    ⓘ LLDP SNMP: Brak odpowiedzi/błąd z community #{i+1}.")
-
-        # CDP (próbuj tylko jeśli jeszcze nie mamy wyników)
-        if cdp_results is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_cdp_neighbors(host='{host}', community='{community}')")
-            current_cdp = snmp_utils.snmp_get_cdp_neighbors(host, community)
-            if current_cdp is not None:
-                print(f"    ✓ CDP SNMP: Odpowiedź z community #{i+1}.")
-                cdp_results = current_cdp # Zapisz wynik i przerwij próby CDP
-            else:
-                print(f"    ⓘ CDP SNMP: Brak odpowiedzi/błąd z community #{i+1}.")
-
-        # Jeśli mamy już wyniki dla obu, nie ma sensu próbować dalej
-        if lldp_results is not None and cdp_results is not None:
-            print("  Mamy wyniki dla LLDP i CDP, przerywam próby z innymi community.")
-            break
-
-    # Przetwarzanie zapisanych wyników
-    if lldp_results:
-        print(f"    Przetwarzanie {len(lldp_results)} sąsiadów LLDP.")
-        for ifidx, sysname, portid in lldp_results:
+    lldp_data = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_lldp_neighbors, "LLDP Neighbors")
+    if isinstance(lldp_data, list):
+        logger.info(f"  SNMP LLDP: Przetwarzanie {len(lldp_data)} sąsiadów dla {host}.")
+        for ifidx, sysname, portid in lldp_data:
             local_if_name = idx2name.get(ifidx, f"ifIndex {ifidx}")
             conns.append(_format_connection(host, local_if_name, sysname, portid, None, "LLDP"))
-    elif lldp_results is None: # Jeśli None, oznacza że były błędy dla wszystkich community
-         print(f"  ⓘ LLDP SNMP: Brak odpowiedzi lub błąd dla wszystkich community.")
 
-    if cdp_results:
-        print(f"    Przetwarzanie {len(cdp_results)} sąsiadów CDP.")
-        for ifidx, dev_id, portid in cdp_results:
+    cdp_data = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_cdp_neighbors, "CDP Neighbors")
+    if isinstance(cdp_data, list):
+        logger.info(f"  SNMP CDP: Przetwarzanie {len(cdp_data)} sąsiadów dla {host}.")
+        for ifidx, dev_id, portid in cdp_data:
             local_if_name = idx2name.get(ifidx, f"ifIndex {ifidx}")
-            cleaned_dev_id = dev_id.split('.')[0]
+            cleaned_dev_id = dev_id.split('.')[0] if '.' in dev_id else dev_id
             conns.append(_format_connection(host, local_if_name, cleaned_dev_id, portid, None, "CDP"))
-    elif cdp_results is None:
-         print(f"  ⓘ CDP SNMP: Brak odpowiedzi lub błąd dla wszystkich community.")
-
     return conns
 
-# Funkcja find_via_api_fdb (bez zmian)
-def find_via_api_fdb(api: LibreNMSAPI, phys_map, target_device):
-    """Odkrywanie przez API FDB LibreNMS."""
-    dev_id = target_device.get("device_id")
-    host = target_device.get("hostname") or target_device.get("ip", f"ID:{dev_id}")
-    if not dev_id: return []
-    print(f"⟶ API-FDB dla {host}")
-    conns = []
-    try:
-        ports = api.get_ports(str(dev_id))
-        if ports is None: print(f"  ⚠ API-FDB: Błąd pobierania portów dla {host}"); return []
-        if not ports: print(f"  ⓘ API-FDB: Brak portów dla {host}"); return []
-        fdb_checked = False
-        for p in ports:
-            pid = p.get("port_id")
-            local_if = p.get("ifName", "") or p.get("ifDescr", f"PortID:{pid}")
-            if not pid: continue
-            fdb_entries = api.get_port_fdb(str(dev_id), str(pid))
-            if fdb_entries is None: print(f"  ⚠ API-FDB: Błąd pobierania FDB dla portu {local_if} (ID:{pid}) na {host}"); continue
-            if not fdb_entries: continue
-            fdb_checked = True
-            for entry in fdb_entries:
-                mac = (entry.get("mac_address") or "").lower().replace(":", "").replace("-", "").replace(".", "").strip()
-                if len(mac) != 12: continue
-                neighbor_info = phys_map.get(mac)
-                if neighbor_info and neighbor_info.get('device_id') != dev_id:
-                    neighbor_host = neighbor_info.get("hostname") or neighbor_info.get("ip", f"ID:{neighbor_info.get('device_id')}")
-                    neighbor_if = neighbor_info.get("ifName") or neighbor_info.get("ifDescr", f"PortID:{neighbor_info.get('port_id')}")
-                    vlan = entry.get("vlan_id") or entry.get("vlanid")
-                    conns.append(_format_connection(host, local_if, neighbor_host, neighbor_if, vlan, "API-FDB"))
-        if not fdb_checked: print(f"  ⓘ API-FDB: Nie znaleziono żadnych wpisów FDB przez API dla {host}")
-    except Exception as e: print(f"  ⚠ API-FDB: Ogólny błąd dla {host}: {e}")
-    return conns
 
-# *** ZMODYFIKOWANA FUNKCJA - Iteracja po liście community ***
-def find_via_snmp_fdb(phys_map, target_device, communities_to_try, idx2name):
-    """
-    Odkrywanie przez SNMP FDB (Bridge-MIB). Iteruje po liście community.
-    """
-    if not communities_to_try: return []
+def find_via_snmp_fdb(phys_map: Dict, target_device: Dict[str, Any], communities_to_try: Optional[List[str]],
+                      idx2name: Dict[int, str]) -> List[Dict[str, Any]]:
     host = target_device.get("hostname") or target_device.get("ip")
     dev_id = target_device.get("device_id")
     if not host or not dev_id: return []
-    print(f"⟶ SNMP FDB (Bridge-MIB) dla {host}...")
+    logger.info(f"⟶ SNMP: Próba odkrycia przez FDB (Bridge-MIB) dla {host}...")
+    conns: List[Dict[str, Any]] = []
 
-    communities = communities_to_try if isinstance(communities_to_try, list) else [communities_to_try]
-    base2if = None
-    fdb_entries = None
+    base2if = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_bridge_baseport_ifindex,
+                                  "BasePortIfIndex (FDB)")
+    if not isinstance(base2if, dict):
+        return []  # Logowanie błędu jest już w _try_snmp_operation
 
-    for i, community in enumerate(communities):
-        if not community: continue
-        print(f"  Próba SNMP z community #{i+1} ('{community}')...")
-        if base2if is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_bridge_baseport_ifindex(host='{host}', community='{community}')")
-            current_base2if = snmp_utils.snmp_get_bridge_baseport_ifindex(host, community)
-            if current_base2if is not None: base2if = current_base2if; print(f"    ✓ BasePort->ifIndex: Odpowiedź z community #{i+1}.")
-            else: print(f"    ⓘ BasePort->ifIndex: Brak odpowiedzi/błąd z community #{i+1}.")
-        if fdb_entries is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_fdb_entries(host='{host}', community='{community}')")
-            current_fdb = snmp_utils.snmp_get_fdb_entries(host, community)
-            if current_fdb is not None: fdb_entries = current_fdb; print(f"    ✓ FDB Entries: Odpowiedź z community #{i+1}.")
-            else: print(f"    ⓘ FDB Entries: Brak odpowiedzi/błąd z community #{i+1}.")
-        if base2if is not None and fdb_entries is not None: print("  Mamy wyniki dla BasePort i FDB, przerywam próby."); break
+    fdb_entries = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_fdb_entries, "FDB Entries")
+    if not isinstance(fdb_entries, list) or not fdb_entries:
+        if isinstance(fdb_entries, list):  # Pusta lista, ale nie błąd
+            logger.info(f"  SNMP FDB: Brak wpisów FDB przez SNMP dla {host}.")
+        return []  # Logowanie błędu (None) jest już w _try_snmp_operation
 
-    if base2if is None: print(f"  ⓘ SNMP FDB: Nie udało się pobrać mapy BasePort->ifIndex."); return []
-    if fdb_entries is None: print(f"  ⓘ SNMP FDB: Nie udało się pobrać wpisów FDB."); return []
-    if not fdb_entries: print(f"  ⓘ SNMP FDB: Brak wpisów FDB przez SNMP dla {host}"); return []
-
-    conns = []
+    logger.info(
+        f"  SNMP FDB: Przetwarzanie {len(fdb_entries)} wpisów FDB dla {host} (mapa BasePort->ifIndex: {len(base2if)} wpisów).")
     for mac, base_port in fdb_entries:
         neighbor_info = phys_map.get(mac)
-        if neighbor_info and neighbor_info.get('device_id') != dev_id:
+        if neighbor_info and str(neighbor_info.get('device_id')) != str(dev_id):  # Porównaj jako stringi dla pewności
             ifidx = base2if.get(base_port)
-            if ifidx:
+            if ifidx is not None:  # Upewnij się, że ifidx istnieje
                 local_if_name = idx2name.get(ifidx, f"ifIndex {ifidx}")
-                neighbor_host = neighbor_info.get("hostname") or neighbor_info.get("ip", f"ID:{neighbor_info.get('device_id')}")
-                neighbor_if = neighbor_info.get("ifName") or neighbor_info.get("ifDescr", f"PortID:{neighbor_info.get('port_id')}")
-                conns.append(_format_connection(host, local_if_name, neighbor_host, neighbor_if, None, "SNMP-FDB"))
+                neighbor_host_ident = neighbor_info.get("hostname") or neighbor_info.get(
+                    "ip") or f"ID:{neighbor_info.get('device_id')}"
+                neighbor_if_ident = neighbor_info.get("ifName") or neighbor_info.get(
+                    "ifDescr") or f"PortID:{neighbor_info.get('port_id')}"
+                conns.append(
+                    _format_connection(host, local_if_name, neighbor_host_ident, neighbor_if_ident, None, "SNMP-FDB"))
     return conns
 
-# *** ZMODYFIKOWANA FUNKCJA - Iteracja po liście community ***
-def find_via_qbridge_snmp(phys_map, target_device, communities_to_try, idx2name):
-    """
-    Odkrywanie przez SNMP FDB (Q-Bridge-MIB). Iteruje po liście community.
-    """
-    if not communities_to_try: return []
+
+def find_via_qbridge_snmp(phys_map: Dict, target_device: Dict[str, Any], communities_to_try: Optional[List[str]],
+                          idx2name: Dict[int, str]) -> List[Dict[str, Any]]:
     host = target_device.get("hostname") or target_device.get("ip")
     dev_id = target_device.get("device_id")
     if not host or not dev_id: return []
-    print(f"⟶ SNMP FDB (Q-Bridge-MIB) dla {host}...")
+    logger.info(f"⟶ SNMP: Próba odkrycia przez FDB (Q-Bridge-MIB) dla {host}...")
+    conns: List[Dict[str, Any]] = []
 
-    communities = communities_to_try if isinstance(communities_to_try, list) else [communities_to_try]
-    base2if = None
-    qbridge_fdb_entries = None
+    base2if = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_bridge_baseport_ifindex,
+                                  "BasePortIfIndex (Q-Bridge)")
+    if not isinstance(base2if, dict):
+        return []
 
-    for i, community in enumerate(communities):
-        if not community: continue
-        print(f"  Próba SNMP z community #{i+1} ('{community}')...")
-        if base2if is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_bridge_baseport_ifindex(host='{host}', community='{community}')")
-            current_base2if = snmp_utils.snmp_get_bridge_baseport_ifindex(host, community)
-            if current_base2if is not None: base2if = current_base2if; print(f"    ✓ BasePort->ifIndex: Odpowiedź z community #{i+1}.")
-            else: print(f"    ⓘ BasePort->ifIndex: Brak odpowiedzi/błąd z community #{i+1}.")
-        if qbridge_fdb_entries is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_qbridge_fdb(host='{host}', community='{community}')")
-            current_qfdb = snmp_utils.snmp_get_qbridge_fdb(host, community)
-            if current_qfdb is not None: qbridge_fdb_entries = current_qfdb; print(f"    ✓ Q-Bridge FDB: Odpowiedź z community #{i+1}.")
-            else: print(f"    ⓘ Q-Bridge FDB: Brak odpowiedzi/błąd z community #{i+1}.")
-        if base2if is not None and qbridge_fdb_entries is not None: print("  Mamy wyniki dla BasePort i Q-FDB, przerywam próby."); break
+    qbridge_fdb_entries = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_qbridge_fdb,
+                                              "Q-Bridge FDB Entries")
+    if not isinstance(qbridge_fdb_entries, list) or not qbridge_fdb_entries:
+        if isinstance(qbridge_fdb_entries, list):
+            logger.info(f"  SNMP Q-Bridge: Brak wpisów Q-Bridge FDB dla {host}.")
+        return []
 
-    if base2if is None: print(f"  ⓘ SNMP Q-BRIDGE: Nie udało się pobrać mapy BasePort->ifIndex."); return []
-    if qbridge_fdb_entries is None: print(f"  ⓘ SNMP Q-BRIDGE: Nie udało się pobrać wpisów Q-BRIDGE FDB."); return []
-    if not qbridge_fdb_entries: print(f"  ⓘ SNMP Q-BRIDGE: Brak wpisów Q-BRIDGE FDB dla {host}"); return []
-
-    conns = []
+    logger.info(
+        f"  SNMP Q-Bridge: Przetwarzanie {len(qbridge_fdb_entries)} wpisów Q-Bridge FDB dla {host} (mapa BasePort->ifIndex: {len(base2if)} wpisów).")
     for mac, vlan, base_port in qbridge_fdb_entries:
         neighbor_info = phys_map.get(mac)
-        if neighbor_info and neighbor_info.get('device_id') != dev_id:
+        if neighbor_info and str(neighbor_info.get('device_id')) != str(dev_id):
             ifidx = base2if.get(base_port)
-            if ifidx:
+            if ifidx is not None:
                 local_if_name = idx2name.get(ifidx, f"ifIndex {ifidx}")
-                neighbor_host = neighbor_info.get("hostname") or neighbor_info.get("ip", f"ID:{neighbor_info.get('device_id')}")
-                neighbor_if = neighbor_info.get("ifName") or neighbor_info.get("ifDescr", f"PortID:{neighbor_info.get('port_id')}")
-                conns.append(_format_connection(host, local_if_name, neighbor_host, neighbor_if, vlan, "SNMP-QBRIDGE"))
+                neighbor_host_ident = neighbor_info.get("hostname") or neighbor_info.get(
+                    "ip") or f"ID:{neighbor_info.get('device_id')}"
+                neighbor_if_ident = neighbor_info.get("ifName") or neighbor_info.get(
+                    "ifDescr") or f"PortID:{neighbor_info.get('port_id')}"
+                conns.append(_format_connection(host, local_if_name, neighbor_host_ident, neighbor_if_ident, vlan,
+                                                "SNMP-QBRIDGE"))
     return conns
 
-# Funkcja find_via_cli (bez zmian)
-def find_via_cli(host, username, password):
-    """Odkrywanie przez CLI (opakowanie na cli_utils)."""
-    if not username or not password: return []
-    return cli_utils.cli_get_neighbors_enhanced(host, username, password)
 
-# *** ZMODYFIKOWANA FUNKCJA - Iteracja po liście community ***
-def find_via_arp_snmp(phys_map, target_device, communities_to_try, idx2name):
-    """
-    Odkrywanie przez SNMP ARP. Iteruje po liście community.
-    """
-    if not communities_to_try: return []
+def find_via_arp_snmp(phys_map: Dict, target_device: Dict[str, Any], communities_to_try: Optional[List[str]],
+                      idx2name: Dict[int, str]) -> List[Dict[str, Any]]:
     host = target_device.get("hostname") or target_device.get("ip")
     dev_id = target_device.get("device_id")
     if not host or not dev_id: return []
-    print(f"⟶ SNMP ARP dla {host}...")
+    logger.info(f"⟶ SNMP: Próba odkrycia przez ARP dla {host}...")
+    conns: List[Dict[str, Any]] = []
 
-    communities = communities_to_try if isinstance(communities_to_try, list) else [communities_to_try]
-    arp_entries = None
+    arp_entries = _try_snmp_operation(host, communities_to_try, snmp_utils.snmp_get_arp_entries, "ARP Entries")
+    if not isinstance(arp_entries, list) or not arp_entries:
+        if isinstance(arp_entries, list):
+            logger.info(f"  SNMP ARP: Brak wpisów ARP dla {host}.")
+        return []
 
-    for i, community in enumerate(communities):
-        if not community: continue
-        print(f"  Próba SNMP z community #{i+1} ('{community}')...")
-        if arp_entries is None:
-            print(f"    DEBUG discovery: Wywołanie snmp_utils.snmp_get_arp_entries(host='{host}', community='{community}')")
-            current_arp = snmp_utils.snmp_get_arp_entries(host, community)
-            if current_arp is not None: # Mamy odpowiedź
-                arp_entries = current_arp
-                print(f"    ✓ ARP Entries: Odpowiedź z community #{i+1}.")
-                break # Wystarczy jedna udana próba
-            else:
-                 print(f"    ⓘ ARP Entries: Brak odpowiedzi/błąd z community #{i+1}.")
-
-    if arp_entries is None: print(f"  ⓘ SNMP ARP: Brak odpowiedzi lub błąd dla wszystkich community."); return []
-    if not arp_entries: print(f"  ⓘ SNMP ARP: Brak wpisów ARP dla {host}"); return []
-
-    conns = []
-    for ipaddr, mac, ifidx in arp_entries:
+    logger.info(f"  SNMP ARP: Przetwarzanie {len(arp_entries)} wpisów ARP dla {host}.")
+    for ipaddr, mac, ifidx_arp in arp_entries:  # Zmieniono ifidx na ifidx_arp dla jasności
         neighbor_info = phys_map.get(mac)
-        if neighbor_info and neighbor_info.get('device_id') != dev_id:
-            local_if_name = idx2name.get(ifidx, f"ifIndex {ifidx}")
-            neighbor_host = neighbor_info.get("hostname") or neighbor_info.get("ip", ipaddr)
-            neighbor_if = neighbor_info.get("ifName") or neighbor_info.get("ifDescr", f"MAC:{mac}")
-            via = f"SNMP-ARP({ipaddr})"
-            conns.append(_format_connection(host, local_if_name, neighbor_host, neighbor_if, None, via))
+        if neighbor_info and str(neighbor_info.get('device_id')) != str(dev_id):
+            local_if_name = idx2name.get(ifidx_arp, f"ifIndex {ifidx_arp}")  # Użyj ifidx_arp
+            # Dla ARP, 'neighbor_host' to urządzenie, którego MAC znaleźliśmy. Jego IP to 'ipaddr'.
+            neighbor_host_ident = neighbor_info.get("hostname") or neighbor_info.get("ip",
+                                                                                     ipaddr)  # Użyj ipaddr jako fallback dla IP sąsiada
+            # 'neighbor_if' to interfejs tego sąsiada.
+            neighbor_if_ident = neighbor_info.get("ifName") or neighbor_info.get("ifDescr") or f"MAC:{mac}"
+            via = f"SNMP-ARP({ipaddr})"  # IP address z wpisu ARP
+            conns.append(_format_connection(host, local_if_name, neighbor_host_ident, neighbor_if_ident, None, via))
     return conns
+
+
+def find_via_api_fdb(api: LibreNMSAPI, phys_map: Dict, target_device: Dict[str, Any]) -> List[Dict[str, Any]]:
+    dev_id = target_device.get("device_id")
+    host_identifier = target_device.get("hostname") or target_device.get("ip") or f"ID:{dev_id}"  # Lepsza nazwa
+    if not dev_id:
+        logger.warning(f"API-FDB: Brak device_id dla urządzenia '{host_identifier}'. Pomijam.")
+        return []
+    logger.info(f"⟶ API-FDB: Próba odkrycia dla {host_identifier}")
+    conns: List[Dict[str, Any]] = []
+    try:
+        ports = api.get_ports(str(dev_id))  # get_ports zwraca listę lub pustą listę, obsługa None jest w kliencie API
+        if not ports:
+            logger.info(f"  API-FDB: Brak portów lub błąd pobierania portów dla {host_identifier} (ID: {dev_id}).")
+            return []
+
+        fdb_entries_found_on_any_port = False
+        for p in ports:
+            port_id = p.get("port_id")
+            local_if_name = p.get("ifName", "") or p.get("ifDescr", "") or f"PortID:{port_id}"
+            if not port_id:
+                logger.debug(f"  API-FDB: Pomijam port bez port_id na {host_identifier}: {p}")
+                continue
+
+            fdb_entries = api.get_port_fdb(str(dev_id), str(port_id))  # get_port_fdb zwraca listę lub pustą listę
+            if not fdb_entries:
+                # logger.debug(f"  API-FDB: Brak wpisów FDB lub błąd pobierania dla portu {local_if_name} (ID:{port_id}) na {host_identifier}.")
+                continue  # Przejdź do następnego portu
+
+            fdb_entries_found_on_any_port = True
+            logger.debug(
+                f"  API-FDB: Przetwarzanie {len(fdb_entries)} wpisów FDB dla portu {local_if_name} na {host_identifier}.")
+            for entry in fdb_entries:
+                mac = (entry.get("mac_address") or "").lower().replace(":", "").replace("-", "").replace(".",
+                                                                                                         "").strip()
+                if len(mac) != 12:
+                    logger.debug(
+                        f"  API-FDB: Pominęto nieprawidłowy MAC '{mac}' na porcie {local_if_name} urządzenia {host_identifier}.")
+                    continue
+
+                neighbor_info = phys_map.get(mac)
+                if neighbor_info and str(neighbor_info.get('device_id')) != str(dev_id):
+                    neighbor_host_ident = neighbor_info.get("hostname") or neighbor_info.get(
+                        "ip") or f"ID:{neighbor_info.get('device_id')}"
+                    neighbor_if_ident = neighbor_info.get("ifName") or neighbor_info.get(
+                        "ifDescr") or f"PortID:{neighbor_info.get('port_id')}"
+                    vlan = entry.get("vlan_id") or entry.get("vlanid")  # Obsługa obu kluczy
+                    conns.append(
+                        _format_connection(host_identifier, local_if_name, neighbor_host_ident, neighbor_if_ident, vlan,
+                                           "API-FDB"))
+
+        if not fdb_entries_found_on_any_port:
+            logger.info(f"  API-FDB: Nie znaleziono żadnych użytecznych wpisów FDB przez API dla {host_identifier}.")
+
+    except Exception as e:
+        logger.error(f"  API-FDB: Ogólny błąd podczas przetwarzania {host_identifier}: {e}", exc_info=True)
+    return conns
+
+
+def find_via_cli(host: str, username: str, password: str) -> List[Dict[str, Any]]:
+    """Odkrywanie przez CLI (opakowanie na cli_utils)."""
+    if not username or not password:
+        # Logowanie o braku poświadczeń powinno być w miejscu, które decyduje o wywołaniu tej funkcji (np. NetworkDiscoverer)
+        logger.debug(f"CLI: Pomijam próbę dla {host} z powodu braku pełnych poświadczeń (użytkownik lub hasło puste).")
+        return []
+    # Zakładamy, że cli_get_neighbors_enhanced już używa loggera po refaktoryzacji
+    return cli_utils.cli_get_neighbors_enhanced(host, username, password)
