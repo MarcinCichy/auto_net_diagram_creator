@@ -4,7 +4,7 @@ from pysnmp.hlapi import (
     ObjectType, ObjectIdentity, nextCmd, OctetString
 )
 from pysnmp.smi import exval
-from pysnmp.error import PySnmpError
+from pysnmp.error import PySnmpError  # Główny błąd PySNMP
 import logging
 from typing import List, Tuple, Dict, Optional, Any
 
@@ -68,23 +68,21 @@ def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP LLDP: Pobieranie danych REM dla {host}...")
-        for error_indication, error_status, error_index, var_binds_table_row in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
-                ObjectType(ObjectIdentity(OID_LLDP_REM_SYS_NAME)), ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_ID)),
-                ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_DESCR)), lexicographicMode=False,
-                ignoreNonIncreasingOid=True
-        ):
-            if error_indication: logger.warning(
-                f"SNMP LLDP REM: Błąd indykacji dla {host}: {error_indication}"); return None
-            if _handle_snmp_response_tuple(host, "LLDP REM", error_indication, error_status, error_index,
-                                           var_binds_table_row): break
-            if not var_binds_table_row or len(var_binds_table_row) < 3: continue
-            is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds_table_row) or \
-                     all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds_table_row) or \
-                     all(exval.noSuchInstance.isSameTypeWith(val[1]) for val in var_binds_table_row)
-            if is_end: break
-            oid_parts = str(var_binds_table_row[0][0]).split('.');
+        cmd_gen_rem = nextCmd(
+            snmp_engine, CommunityData(community, mpModel=1),
+            UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
+            ObjectType(ObjectIdentity(OID_LLDP_REM_SYS_NAME)), ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_ID)),
+            ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_DESCR)), lexicographicMode=False, ignoreNonIncreasingOid=True)
+
+        for response_item_rem in cmd_gen_rem:
+            error_indication_rem, error_status_rem, error_index_rem, var_binds_rem = response_item_rem
+            if _handle_snmp_response_tuple(host, "LLDP REM", error_indication_rem, error_status_rem, error_index_rem,
+                                           var_binds_rem):
+                if error_indication_rem: return None  # Krytyczny błąd transportu/silnika
+                break  # Błąd statusu SNMP lub koniec MIB
+            if not var_binds_rem or len(var_binds_rem) < 3: continue
+            # ... (logika parsowania var_binds_table_row jak w poprzedniej odpowiedzi) ...
+            oid_parts = str(var_binds_rem[0][0]).split('.');
             base_oid_len = len(OID_LLDP_REM_SYS_NAME.split('.'))
             if len(oid_parts) <= base_oid_len + 1: continue
             try:
@@ -93,29 +91,27 @@ def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries
                 continue
             key = (time_mark, local_port_num)
             if key not in neighs_data: neighs_data[key] = {}
-            neighs_data[key]['sysname'] = str(var_binds_table_row[0][1]);
-            neighs_data[key]['port_id'] = str(var_binds_table_row[1][1]);
-            neighs_data[key]['port_descr'] = str(var_binds_table_row[2][1])
+            neighs_data[key]['sysname'] = str(var_binds_rem[0][1]);
+            neighs_data[key]['port_id'] = str(var_binds_rem[1][1]);
+            neighs_data[key]['port_descr'] = str(var_binds_rem[2][1])
 
         if not neighs_data: logger.info(f"SNMP LLDP: Nie znaleziono danych REM sąsiadów dla {host}."); return []
         logger.debug(f"SNMP LLDP: Pobieranie danych LOC dla {host}...")
         loc_port_to_ifindex_map: Dict[int, int] = {}
-        for error_indication_loc, error_status_loc, error_index_loc, var_binds_loc in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1), UdpTransportTarget((host, 161), timeout=2, retries=1),
-                ContextData(),
-                ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID_SUBTYPE)),
-                ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID)),
-                lexicographicMode=False, ignoreNonIncreasingOid=True
-        ):
-            if error_indication_loc: logger.warning(
-                f"SNMP LLDP LOC: Błąd indykacji dla {host}: {error_indication_loc}"); break
+        cmd_gen_loc = nextCmd(
+            snmp_engine, CommunityData(community, mpModel=1), UdpTransportTarget((host, 161), timeout=2, retries=1),
+            ContextData(),
+            ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID_SUBTYPE)), ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID)),
+            lexicographicMode=False, ignoreNonIncreasingOid=True)
+        for response_item_loc in cmd_gen_loc:
+            error_indication_loc, error_status_loc, error_index_loc, var_binds_loc = response_item_loc
             if _handle_snmp_response_tuple(host, "LLDP LOC", error_indication_loc, error_status_loc, error_index_loc,
-                                           var_binds_loc): break
+                                           var_binds_loc):
+                if error_indication_loc: logger.warning(
+                    f"SNMP LLDP: Problem z pobraniem mapowania LOC Port->ifIndex (błąd indykacji) dla {host}.")
+                break
             if not var_binds_loc or len(var_binds_loc) < 2: continue
-            is_end_loc = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds_loc) or \
-                         all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds_loc) or \
-                         all(exval.noSuchInstance.isSameTypeWith(val[1]) for val in var_binds_loc)
-            if is_end_loc: break
+            # ... (reszta logiki parsowania var_binds_loc) ...
             oid_parts_loc = str(var_binds_loc[0][0]).split('.');
             base_oid_len_loc = len(OID_LLDP_LOC_PORT_ID_SUBTYPE.split('.'))
             if len(oid_parts_loc) <= base_oid_len_loc: continue
@@ -148,11 +144,11 @@ def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries
                     chosen_remote_port = remote_port_descr
             if not chosen_remote_port or "not advertised" in chosen_remote_port.lower(): continue
             final_results.append((ifidx, remote_sys_name, chosen_remote_port))
-    except PySnmpError as e_pysnmp_outer:
-        logger.error(f"SNMP LLDP: Krytyczny błąd PySnmpError (poza pętlą) dla {host}: {e_pysnmp_outer}", exc_info=False)
+    except PySnmpError as e_pysnmp_outer:  # Błędy rzucone przez sam nextCmd(), np. timeout przed pierwszą iteracją
+        logger.error(f"SNMP LLDP: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
         return None
-    except Exception as e_outer:
-        logger.error(f"SNMP LLDP: Ogólny, nieoczekiwany błąd (poza pętlą) dla {host}: {e_outer}", exc_info=True)
+    except Exception as e_outer:  # Inne nieoczekiwane błędy
+        logger.error(f"SNMP LLDP: Ogólny, nieoczekiwany błąd dla {host}: {e_outer}", exc_info=True)
         return None
     logger.info(f"SNMP LLDP: Zakończono dla {host}, znaleziono {len(final_results)} sąsiadów.")
     return final_results
@@ -380,10 +376,10 @@ def snmp_get_arp_entries(host: str, community: str, timeout: int = 5, retries: i
             if len(mac_str) != 12: continue
             ip_address = str(var_binds[2][1])
             entries.append((ip_address, mac_str, if_index))
-    except PySnmpError as e_pysnmp_outer:
+    except PySnmpError as e_pysnmp_outer:  # Błędy na poziomie inicjalizacji/transportu nextCmd
         logger.error(f"SNMP ARP: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
         return None
-    except Exception as e_outer:
+    except Exception as e_outer:  # Inne nieoczekiwane błędy
         logger.error(f"SNMP ARP: Ogólny błąd dla {host}: {e_outer}", exc_info=True)
         return None
     logger.info(f"SNMP ARP: Zakończono dla {host}, znaleziono {len(entries)} wpisów.")
