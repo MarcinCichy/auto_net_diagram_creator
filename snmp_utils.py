@@ -23,16 +23,14 @@ def _handle_snmp_response_tuple(
     Interpretuje error_indication i error_status z krotki zwróconej przez pysnmp.
     Zwraca True, jeśli wystąpił błąd krytyczny, który powinien przerwać operację.
     """
-    if error_indication:
-        if isinstance(error_indication, PySnmpError):
-            logger.warning(f"SNMP {operation_name}: Błąd (PySnmpError) dla {host}: {error_indication}")
-        else:
-            logger.warning(f"SNMP {operation_name}: Błąd indykacji dla {host}: {error_indication}")
+    if error_indication:  # error_indication jest ustawione przez pysnmp w przypadku problemów
+        # Można tu dodać bardziej szczegółowe logowanie typów błędów, np. timeout
+        logger.warning(f"SNMP {operation_name}: Błąd indykacji dla {host}: {error_indication}")
         return True
     elif error_status:
         error_message = error_status.prettyPrint()
         if int(error_status) == 0:  # noError
-            return False
+            return False  # Brak błędu
 
         is_critical_status = True
         if var_binds:
@@ -52,8 +50,52 @@ def _handle_snmp_response_tuple(
             logger.warning(
                 f"SNMP {operation_name}: Błąd statusu dla {host}: {error_message} at {error_index.prettyPrint() if error_index else 'N/A'}"
                 f"{(' (pierwszy OID: ' + var_binds[0][0].prettyPrint() + ')') if var_binds and len(var_binds) > 0 and var_binds[0] else ''}")
-            return True
-    return False
+            return True  # To jest błąd, który powinien przerwać operację
+    return False  # Brak błędu krytycznego
+
+
+# --- WZORZEC DLA WSZYSTKICH FUNKCJI SNMP Z NOWĄ OBSŁUGĄ nextCmd ---
+def _execute_snmp_next_cmd(snmp_engine, auth_data, transport_target, context_data, *var_types_and_oids):
+    """
+    Wewnętrzna funkcja pomocnicza do opakowania wywołania nextCmd i obsługi jego wyników
+    w sposób bardziej odporny na błędy.
+    """
+    cmd_gen = nextCmd(
+        snmp_engine, auth_data, transport_target, context_data,
+        *var_types_and_oids,
+        lexicographicMode=False, ignoreNonIncreasingOid=True
+    )
+    results = []
+    while True:
+        try:
+            response_item = next(cmd_gen)
+            # response_item to krotka (errorIndication, errorStatus, errorIndex, varBinds)
+            # LUB sam obiekt błędu jeśli PySNMP rzuci go przed zwróceniem krotki
+            if isinstance(response_item, PySnmpError):  # Bezpośredni błąd zwrócony przez generator
+                error_indication = response_item
+                error_status = error_index = var_binds = None
+            else:  # Powinna to być krotka
+                error_indication, error_status, error_index, var_binds = response_item
+
+            results.append((error_indication, error_status, error_index, var_binds))
+
+        except StopIteration:  # Normalne zakończenie generatora
+            break
+        except PySnmpError as e:  # Błąd rzucony przez samo next(cmd_gen)
+            logger.warning(f"SNMP: Błąd PySnmpError podczas pobierania następnego elementu: {e}")
+            results.append((e, None, None, None))  # Dodaj błąd do wyników
+            break  # Przerwij dalszą iterację
+        except TypeError as e:  # Potencjalny błąd, jeśli nextCmd zwróci coś nieoczekiwanego
+            logger.error(
+                f"SNMP: TypeError podczas obsługi wyniku nextCmd: {e}. Zwrócony element: {response_item if 'response_item' in locals() else 'Nieznany'}")
+            results.append((PySnmpError(f"TypeError processing nextCmd: {e}"), None, None, None))
+            break
+        except Exception as e:  # Inne nieoczekiwane błędy
+            logger.error(f"SNMP: Nieoczekiwany błąd podczas iteracji nextCmd: {e}", exc_info=True)
+            results.append((PySnmpError(f"Unexpected error in nextCmd: {e}"), None, None, None))
+            break
+
+    return results
 
 
 def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries: int = 1) -> Optional[
@@ -68,20 +110,22 @@ def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP LLDP: Pobieranie danych REM dla {host}...")
-        cmd_gen_rem = nextCmd(
+        responses_rem = _execute_snmp_next_cmd(
             snmp_engine, CommunityData(community, mpModel=1),
             UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
             ObjectType(ObjectIdentity(OID_LLDP_REM_SYS_NAME)), ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_ID)),
-            ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_DESCR)), lexicographicMode=False, ignoreNonIncreasingOid=True)
-
-        for response_item_rem in cmd_gen_rem:
-            error_indication_rem, error_status_rem, error_index_rem, var_binds_rem = response_item_rem
+            ObjectType(ObjectIdentity(OID_LLDP_REM_PORT_DESCR))
+        )
+        for error_indication_rem, error_status_rem, error_index_rem, var_binds_rem in responses_rem:
             if _handle_snmp_response_tuple(host, "LLDP REM", error_indication_rem, error_status_rem, error_index_rem,
                                            var_binds_rem):
-                if error_indication_rem: return None  # Krytyczny błąd transportu/silnika
-                break  # Błąd statusu SNMP lub koniec MIB
+                if error_indication_rem: return None
+                break
             if not var_binds_rem or len(var_binds_rem) < 3: continue
-            # ... (logika parsowania var_binds_table_row jak w poprzedniej odpowiedzi) ...
+            is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds_rem) or \
+                     all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds_rem) or \
+                     all(exval.noSuchInstance.isSameTypeWith(val[1]) for val in var_binds_rem)
+            if is_end: break
             oid_parts = str(var_binds_rem[0][0]).split('.');
             base_oid_len = len(OID_LLDP_REM_SYS_NAME.split('.'))
             if len(oid_parts) <= base_oid_len + 1: continue
@@ -98,20 +142,21 @@ def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries
         if not neighs_data: logger.info(f"SNMP LLDP: Nie znaleziono danych REM sąsiadów dla {host}."); return []
         logger.debug(f"SNMP LLDP: Pobieranie danych LOC dla {host}...")
         loc_port_to_ifindex_map: Dict[int, int] = {}
-        cmd_gen_loc = nextCmd(
+        responses_loc = _execute_snmp_next_cmd(
             snmp_engine, CommunityData(community, mpModel=1), UdpTransportTarget((host, 161), timeout=2, retries=1),
             ContextData(),
-            ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID_SUBTYPE)), ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID)),
-            lexicographicMode=False, ignoreNonIncreasingOid=True)
-        for response_item_loc in cmd_gen_loc:
-            error_indication_loc, error_status_loc, error_index_loc, var_binds_loc = response_item_loc
+            ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID_SUBTYPE)), ObjectType(ObjectIdentity(OID_LLDP_LOC_PORT_ID)))
+        for error_indication_loc, error_status_loc, error_index_loc, var_binds_loc in responses_loc:
             if _handle_snmp_response_tuple(host, "LLDP LOC", error_indication_loc, error_status_loc, error_index_loc,
                                            var_binds_loc):
                 if error_indication_loc: logger.warning(
                     f"SNMP LLDP: Problem z pobraniem mapowania LOC Port->ifIndex (błąd indykacji) dla {host}.")
                 break
             if not var_binds_loc or len(var_binds_loc) < 2: continue
-            # ... (reszta logiki parsowania var_binds_loc) ...
+            is_end_loc = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds_loc) or \
+                         all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds_loc) or \
+                         all(exval.noSuchInstance.isSameTypeWith(val[1]) for val in var_binds_loc)
+            if is_end_loc: break
             oid_parts_loc = str(var_binds_loc[0][0]).split('.');
             base_oid_len_loc = len(OID_LLDP_LOC_PORT_ID_SUBTYPE.split('.'))
             if len(oid_parts_loc) <= base_oid_len_loc: continue
@@ -144,11 +189,8 @@ def snmp_get_lldp_neighbors(host: str, community: str, timeout: int = 5, retries
                     chosen_remote_port = remote_port_descr
             if not chosen_remote_port or "not advertised" in chosen_remote_port.lower(): continue
             final_results.append((ifidx, remote_sys_name, chosen_remote_port))
-    except PySnmpError as e_pysnmp_outer:  # Błędy rzucone przez sam nextCmd(), np. timeout przed pierwszą iteracją
-        logger.error(f"SNMP LLDP: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
-        return None
-    except Exception as e_outer:  # Inne nieoczekiwane błędy
-        logger.error(f"SNMP LLDP: Ogólny, nieoczekiwany błąd dla {host}: {e_outer}", exc_info=True)
+    except Exception as e_outer:  # Ogólny łapacz, jeśli coś pójdzie nie tak w logice przed/po wywołaniach SNMP
+        logger.error(f"SNMP LLDP: Ogólny, nieoczekiwany błąd (poza pętlą SNMP) dla {host}: {e_outer}", exc_info=True)
         return None
     logger.info(f"SNMP LLDP: Zakończono dla {host}, znaleziono {len(final_results)} sąsiadów.")
     return final_results
@@ -164,14 +206,14 @@ def snmp_get_cdp_neighbors(host: str, community: str, timeout: int = 5, retries:
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP CDP: Pobieranie danych dla {host}...")
-        for error_indication, error_status, error_index, var_binds in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
-                ObjectType(ObjectIdentity(OID_CDP_IFINDEX)), ObjectType(ObjectIdentity(OID_CDP_DEV_ID)),
-                ObjectType(ObjectIdentity(OID_CDP_PORT_ID)), lexicographicMode=False, ignoreNonIncreasingOid=True
-        ):
-            if error_indication: logger.warning(f"SNMP CDP: Błąd indykacji dla {host}: {error_indication}"); return None
-            if _handle_snmp_response_tuple(host, "CDP", error_indication, error_status, error_index, var_binds): break
+        responses = _execute_snmp_next_cmd(
+            snmp_engine, CommunityData(community, mpModel=1),
+            UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
+            ObjectType(ObjectIdentity(OID_CDP_IFINDEX)), ObjectType(ObjectIdentity(OID_CDP_DEV_ID)),
+            ObjectType(ObjectIdentity(OID_CDP_PORT_ID)))
+        for error_indication, error_status, error_index, var_binds in responses:
+            if _handle_snmp_response_tuple(host, "CDP", error_indication, error_status, error_index, var_binds):
+                if error_indication: return None; break
             if not var_binds or len(var_binds) < 3: continue
             is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds) or \
                      all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds) or \
@@ -190,9 +232,6 @@ def snmp_get_cdp_neighbors(host: str, community: str, timeout: int = 5, retries:
         for data in neighs_map.values():
             if 'ifindex' in data and data.get('dev_id') and data.get('port_id'):
                 final_results.append((data['ifindex'], data['dev_id'], data['port_id']))
-    except PySnmpError as e_pysnmp_outer:
-        logger.error(f"SNMP CDP: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
-        return None
     except Exception as e_outer:
         logger.error(f"SNMP CDP: Ogólny błąd dla {host}: {e_outer}", exc_info=True)
         return None
@@ -207,15 +246,14 @@ def snmp_get_bridge_baseport_ifindex(host: str, community: str, timeout: int = 2
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP BasePortIfIndex: Pobieranie danych dla {host}...")
-        for error_indication, error_status, error_index, var_binds in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
-                ObjectType(ObjectIdentity(OID_BASE_PORT_IFINDEX)), lexicographicMode=False, ignoreNonIncreasingOid=True
-        ):
-            if error_indication: logger.warning(
-                f"SNMP BasePortIfIndex: Błąd indykacji dla {host}: {error_indication}"); return None
+        responses = _execute_snmp_next_cmd(
+            snmp_engine, CommunityData(community, mpModel=1),
+            UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
+            ObjectType(ObjectIdentity(OID_BASE_PORT_IFINDEX)))
+        for error_indication, error_status, error_index, var_binds in responses:
             if _handle_snmp_response_tuple(host, "BasePortIfIndex", error_indication, error_status, error_index,
-                                           var_binds): break
+                                           var_binds):
+                if error_indication: return None; break
             if not var_binds: continue
             is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds) or \
                      all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds) or \
@@ -229,9 +267,6 @@ def snmp_get_bridge_baseport_ifindex(host: str, community: str, timeout: int = 2
                     base_port_id] = ifindex
             except ValueError:
                 continue
-    except PySnmpError as e_pysnmp_outer:
-        logger.error(f"SNMP BasePortIfIndex: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
-        return None
     except Exception as e_outer:
         logger.error(f"SNMP BasePortIfIndex: Ogólny błąd dla {host}: {e_outer}", exc_info=True)
         return None
@@ -247,15 +282,14 @@ def snmp_get_fdb_entries(host: str, community: str, timeout: int = 5, retries: i
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP FDB (Bridge-MIB): Pobieranie danych dla {host}...")
-        for error_indication, error_status, error_index, var_binds in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
-                ObjectType(ObjectIdentity(OID_FDB_ADDRESS)), ObjectType(ObjectIdentity(OID_FDB_PORT)),
-                lexicographicMode=False, ignoreNonIncreasingOid=True
-        ):
-            if error_indication: logger.warning(f"SNMP FDB: Błąd indykacji dla {host}: {error_indication}"); return None
+        responses = _execute_snmp_next_cmd(
+            snmp_engine, CommunityData(community, mpModel=1),
+            UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
+            ObjectType(ObjectIdentity(OID_FDB_ADDRESS)), ObjectType(ObjectIdentity(OID_FDB_PORT)))
+        for error_indication, error_status, error_index, var_binds in responses:
             if _handle_snmp_response_tuple(host, "FDB (Bridge-MIB)", error_indication, error_status, error_index,
-                                           var_binds): break
+                                           var_binds):
+                if error_indication: return None; break
             if not var_binds or len(var_binds) < 2: continue
             is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds) or \
                      all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds) or \
@@ -275,9 +309,6 @@ def snmp_get_fdb_entries(host: str, community: str, timeout: int = 5, retries: i
             except ValueError:
                 continue
             entries.append((mac_str, base_port_id))
-    except PySnmpError as e_pysnmp_outer:
-        logger.error(f"SNMP FDB: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
-        return None
     except Exception as e_outer:
         logger.error(f"SNMP FDB (Bridge-MIB): Ogólny błąd dla {host}: {e_outer}", exc_info=True)
         return None
@@ -293,16 +324,14 @@ def snmp_get_qbridge_fdb(host: str, community: str, timeout: int = 5, retries: i
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP FDB (Q-Bridge-MIB): Pobieranie danych dla {host}...")
-        for error_indication, error_status, error_index, var_binds in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
-                ObjectType(ObjectIdentity(OID_QBRIDGE_ADDRESS)), ObjectType(ObjectIdentity(OID_QBRIDGE_PORT)),
-                lexicographicMode=False, ignoreNonIncreasingOid=True
-        ):
-            if error_indication: logger.warning(
-                f"SNMP Q-FDB: Błąd indykacji dla {host}: {error_indication}"); return None
+        responses = _execute_snmp_next_cmd(
+            snmp_engine, CommunityData(community, mpModel=1),
+            UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
+            ObjectType(ObjectIdentity(OID_QBRIDGE_ADDRESS)), ObjectType(ObjectIdentity(OID_QBRIDGE_PORT)))
+        for error_indication, error_status, error_index, var_binds in responses:
             if _handle_snmp_response_tuple(host, "FDB (Q-Bridge-MIB)", error_indication, error_status, error_index,
-                                           var_binds): break
+                                           var_binds):
+                if error_indication: return None; break
             if not var_binds or len(var_binds) < 2: continue
             is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds) or \
                      all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds) or \
@@ -327,9 +356,6 @@ def snmp_get_qbridge_fdb(host: str, community: str, timeout: int = 5, retries: i
             except ValueError:
                 continue
             entries.append((mac_str, vlan_id, base_port_id))
-    except PySnmpError as e_pysnmp_outer:
-        logger.error(f"SNMP Q-FDB: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
-        return None
     except Exception as e_outer:
         logger.error(f"SNMP FDB (Q-Bridge-MIB): Ogólny błąd dla {host}: {e_outer}", exc_info=True)
         return None
@@ -346,14 +372,14 @@ def snmp_get_arp_entries(host: str, community: str, timeout: int = 5, retries: i
     snmp_engine = SnmpEngine()
     try:
         logger.debug(f"SNMP ARP: Pobieranie danych dla {host}...")
-        for error_indication, error_status, error_index, var_binds in nextCmd(
-                snmp_engine, CommunityData(community, mpModel=1),
-                UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
-                ObjectType(ObjectIdentity(OID_ARP_IFINDEX)), ObjectType(ObjectIdentity(OID_ARP_MAC)),
-                ObjectType(ObjectIdentity(OID_ARP_IP)), lexicographicMode=False, ignoreNonIncreasingOid=True
-        ):
-            if error_indication: logger.warning(f"SNMP ARP: Błąd indykacji dla {host}: {error_indication}"); return None
-            if _handle_snmp_response_tuple(host, "ARP", error_indication, error_status, error_index, var_binds): break
+        responses = _execute_snmp_next_cmd(
+            snmp_engine, CommunityData(community, mpModel=1),
+            UdpTransportTarget((host, 161), timeout=timeout, retries=retries), ContextData(),
+            ObjectType(ObjectIdentity(OID_ARP_IFINDEX)), ObjectType(ObjectIdentity(OID_ARP_MAC)),
+            ObjectType(ObjectIdentity(OID_ARP_IP)))
+        for error_indication, error_status, error_index, var_binds in responses:
+            if _handle_snmp_response_tuple(host, "ARP", error_indication, error_status, error_index, var_binds):
+                if error_indication: return None; break
             if not var_binds or len(var_binds) < 3: continue
             is_end = all(exval.endOfMibView.isSameTypeWith(val[1]) for val in var_binds) or \
                      all(exval.noSuchObject.isSameTypeWith(val[1]) for val in var_binds) or \
@@ -376,10 +402,7 @@ def snmp_get_arp_entries(host: str, community: str, timeout: int = 5, retries: i
             if len(mac_str) != 12: continue
             ip_address = str(var_binds[2][1])
             entries.append((ip_address, mac_str, if_index))
-    except PySnmpError as e_pysnmp_outer:  # Błędy na poziomie inicjalizacji/transportu nextCmd
-        logger.error(f"SNMP ARP: Krytyczny błąd PySnmpError dla {host}: {e_pysnmp_outer}", exc_info=False)
-        return None
-    except Exception as e_outer:  # Inne nieoczekiwane błędy
+    except Exception as e_outer:
         logger.error(f"SNMP ARP: Ogólny błąd dla {host}: {e_outer}", exc_info=True)
         return None
     logger.info(f"SNMP ARP: Zakończono dla {host}, znaleziono {len(entries)} wpisów.")
