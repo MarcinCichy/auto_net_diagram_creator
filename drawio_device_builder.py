@@ -23,7 +23,8 @@ PORT_ALIAS_LINE_EXTENSION = 30.0;
 PORT_ALIAS_LABEL_OFFSET_FROM_LINE = 2.0;
 PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER = 5.0
 INFO_LABEL_MARGIN_FROM_CHASSIS = 30.0;
-INFO_LABEL_MIN_WIDTH = 200.0
+INFO_LABEL_MIN_WIDTH = 180.0
+INFO_LABEL_MAX_WIDTH = 280.0
 
 
 class StyleInfo(NamedTuple):
@@ -44,7 +45,7 @@ class StyleInfo(NamedTuple):
     dummy_endpoint_style: str = "shape=ellipse;perimeter=ellipsePerimeter;fillColor=none;strokeColor=none;resizable=0;movable=0;editable=0;portConstraint=none;noLabel=1;selectable=0;deletable=0;points=[];"
 
 
-def _extract_styles_from_template(template_path: str) -> StyleInfo:
+def _extract_styles_from_template(template_path: str) -> StyleInfo:  # ... (bez zmian) ...
     if ET is None: logger.error("Moduł ET niedostępny w _extract_styles_from_template."); return StyleInfo()
     logger.debug(f"Próba wczytania stylów Draw.io z szablonu: {template_path}")
     tree = drawio_utils.load_drawio_template(template_path);
@@ -64,7 +65,7 @@ def _extract_styles_from_template(template_path: str) -> StyleInfo:
 
 
 def calculate_dynamic_device_size(device_info: Dict[str, Any], api_client: LibreNMSAPI,
-                                  device_index_for_log: int = 0) -> Tuple[float, float]:
+                                  device_index_for_log: int = 0) -> Tuple[float, float]:  # ... (bez zmian) ...
     if ET is None: return (common_device_logic.MIN_CHASSIS_WIDTH, common_device_logic.MIN_CHASSIS_HEIGHT)
     logger.debug(f"DrawIO: Obliczanie rozmiaru dla urządzenia (log index: {device_index_for_log})...")
     try:
@@ -85,7 +86,6 @@ def add_device_to_diagram(
     port_map_for_device: Dict[Any, PortEndpointData] = {};
     offset_x, offset_y = position
     group_id_base, group_cell_id = f"dev{device_internal_idx}", f"group_dev{device_internal_idx}"
-
     try:
         prepared_data: DeviceDisplayData = common_device_logic.prepare_device_display_data(device_api_info, api_client,
                                                                                            device_internal_idx)
@@ -94,7 +94,6 @@ def add_device_to_diagram(
             f"DrawIO: Krytyczny błąd przygotowania danych dla '{device_api_info.get('hostname')}': {e}. Pomijam.",
             exc_info=True);
         return None
-
     current_host_identifier = prepared_data.canonical_identifier
     logger.info(
         f"DrawIO: Dodawanie urządzenia: {current_host_identifier} (idx: {device_internal_idx}) na ({offset_x:.0f}, {offset_y:.0f})")
@@ -106,7 +105,6 @@ def add_device_to_diagram(
     chassis_cell = drawio_utils.create_vertex_cell(chassis_id, group_cell_id, "", 0, 0, chassis_width, chassis_height,
                                                    styles.chassis);
     global_root_cell.append(chassis_cell)
-
     ports_to_draw = prepared_data.physical_ports_for_chassis_layout
     num_layout_rows, ports_per_row_config = prepared_data.chassis_layout.num_rows, prepared_data.chassis_layout.ports_per_row
     ports_in_rows_dist: List[int] = []
@@ -114,21 +112,20 @@ def add_device_to_diagram(
         if num_layout_rows == 1:
             ports_in_rows_dist.append(len(ports_to_draw))
         elif num_layout_rows == 2:
-            r1_c = math.ceil(len(ports_to_draw) / 2.0)
-            ports_in_rows_dist.append(int(r1_c))
+            r1_c = math.ceil(len(ports_to_draw) / 2.0);
+            ports_in_rows_dist.append(int(r1_c));
             ports_in_rows_dist.append(len(ports_to_draw) - int(r1_c))
-        else:  # Dla 0 lub > 2 rzędów
-            if num_layout_rows > 0:  # Tylko jeśli są jakieś rzędy do wypełnienia
+        else:
+            if num_layout_rows > 0:
                 rem_p = len(ports_to_draw)
                 for _ in range(num_layout_rows):
-                    c_tr = min(rem_p, ports_per_row_config)
-                    ports_in_rows_dist.append(c_tr)
-                    rem_p -= c_tr
-                    if rem_p <= 0:  # POPRAWKA: Zamiast If(_nc==0)
-                        break
-
+                    c_tr = min(rem_p, ports_per_row_config);
+                    ports_in_rows_dist.append(c_tr);
+                    rem_p -= c_tr;
+                    if rem_p <= 0: break  # Poprawiona składnia
     cur_port_idx = 0
-    for row_idx, num_ports_row in enumerate(ports_in_rows_dist):
+    for row_idx, num_ports_row in enumerate(
+            ports_in_rows_dist):  # ... (reszta logiki rysowania portów i mgmt0 bez zmian)...
         if num_ports_row == 0: continue
         cur_row_w = num_ports_row * PORT_WIDTH + max(0, num_ports_row - 1) * HORIZONTAL_SPACING;
         row_start_x = (chassis_width - cur_row_w) / 2
@@ -182,13 +179,16 @@ def add_device_to_diagram(
                             LABEL_LINE_HEIGHT * 0.65)) + 2 * LABEL_PADDING
                 aux_sx_abs, aux_ex_abs = offset_x + center_x_p_rel, offset_x + center_x_p_rel
                 lbl_drawio_x, lbl_drawio_y = 0.0, 0.0
+                current_label_style = styles.label_rot
                 if conn_orient == "up":
-                    aux_sy_abs, aux_ey_abs = offset_y, offset_y - PORT_ALIAS_LINE_EXTENSION;lbl_drawio_x, lbl_drawio_y = aux_ex_abs + PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER, aux_ey_abs - lbl_unrot_h - PORT_ALIAS_LABEL_OFFSET_FROM_LINE
-                else:
-                    aux_sy_abs, aux_ey_abs = offset_y + chassis_height, offset_y + chassis_height + PORT_ALIAS_LINE_EXTENSION;lbl_drawio_x, lbl_drawio_y = aux_ex_abs + PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER, aux_ey_abs + PORT_ALIAS_LABEL_OFFSET_FROM_LINE
+                    aux_sy_abs, aux_ey_abs = offset_y + py, offset_y + py - PORT_ALIAS_LINE_EXTENSION  # Linia od portu
+                    lbl_drawio_x, lbl_drawio_y = aux_ex_abs + PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER, aux_ey_abs - lbl_unrot_h - PORT_ALIAS_LABEL_OFFSET_FROM_LINE
+                elif conn_orient == "down":
+                    aux_sy_abs, aux_ey_abs = offset_y + py + PORT_HEIGHT, offset_y + py + PORT_HEIGHT + PORT_ALIAS_LINE_EXTENSION  # Linia od portu
+                    lbl_drawio_x, lbl_drawio_y = aux_ex_abs + PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER, aux_ey_abs + PORT_ALIAS_LABEL_OFFSET_FROM_LINE
                 alias_lbl_cell = drawio_utils.create_vertex_cell(alias_lbl_id, "1", alias_txt, lbl_drawio_x,
                                                                  lbl_drawio_y, lbl_unrot_w, lbl_unrot_h,
-                                                                 styles.label_rot, connectable="0");
+                                                                 current_label_style, connectable="0");
                 global_root_cell.append(alias_lbl_cell)
                 aux_edge_cell = drawio_utils.create_floating_edge_cell(aux_edge_id, "1", styles.aux_line,
                                                                        (aux_sx_abs, aux_sy_abs),
@@ -196,9 +196,8 @@ def add_device_to_diagram(
                 global_root_cell.append(aux_edge_cell)
             cur_port_idx += 1
         if cur_port_idx >= len(ports_to_draw): break
-
     mgmt0_info = prepared_data.mgmt0_port_info
-    if mgmt0_info:  # ... (logika mgmt0 bez zmian) ...
+    if mgmt0_info:
         logger.debug(f"  DrawIO: Dodawanie portu mgmt0 dla {current_host_identifier}...")
         mgmt0_ifidx, mgmt0_pid = mgmt0_info.get('ifIndex'), mgmt0_info.get('port_id')
         mgmt0_base_id = f"mgmt0_{mgmt0_ifidx if mgmt0_ifidx is not None else mgmt0_pid if mgmt0_pid is not None else 'na'}"
@@ -280,7 +279,7 @@ def add_device_to_diagram(
             name, descr, alias = str(p.get('ifName', 'N/A')).strip(), str(p.get('ifDescr', '')).strip(), str(
                 p.get('ifAlias', '')).strip()
             s_disp, aS_disp = str(p.get('ifOperStatus', 'u')).lower(), str(p.get('ifAdminStatus', 'u')).lower()
-            s_fill_val = styles.port_unknown_fill.split('=')[-1]  # Domyślny
+            s_fill_val = styles.port_unknown_fill.split('=')[-1]
             if aS_disp == "down":
                 s_fill_val = styles.port_shutdown_fill.split('=')[-1]
             elif s_disp == "up":
@@ -315,7 +314,10 @@ def add_device_to_diagram(
         log_ifs_html += "<div style='padding-left:7px;'>(brak)</div>"
     log_ifs_html += "</div>"
     full_dev_lbl_html = f"{base_dev_lbl_html}<hr size='1' style='margin:2px 0;'/>{phys_ports_html}<hr size='1' style='margin:2px 0;'/>{log_ifs_html}"
-    info_lbl_w = max(chassis_width * 0.7, INFO_LABEL_MIN_WIDTH)
+
+    info_label_width = min(max(chassis_width * 0.65, INFO_LABEL_MIN_WIDTH),
+                           INFO_LABEL_MAX_WIDTH)  # Użycie INFO_LABEL_MAX_WIDTH
+
     num_base_lines = 3 + len(display_extra) + (2 if prepared_data.ports_display_limited else 0)
     base_h = num_base_lines * (LABEL_LINE_HEIGHT + 3) + 10
     phys_h = min(PHYSICAL_PORT_LIST_MAX_HEIGHT,
@@ -323,13 +325,13 @@ def add_device_to_diagram(
     log_h = min(LOGICAL_IF_LIST_MAX_HEIGHT,
                 max(20, len(prepared_data.logical_interfaces) * (LABEL_LINE_HEIGHT + 3))) + 25
     info_lbl_h = base_h + phys_h + log_h + 20
-    info_lbl_abs_x, info_lbl_abs_y = offset_x - info_lbl_w - INFO_LABEL_MARGIN_FROM_CHASSIS, offset_y + (
+    info_lbl_abs_x, info_lbl_abs_y = offset_x - info_label_width - INFO_LABEL_MARGIN_FROM_CHASSIS, offset_y + (
                 chassis_height / 2) - (info_lbl_h / 2)
     info_lbl_abs_y = max((drawio_layout.DEFAULT_MARGIN_Y / 3) if hasattr(drawio_layout,
                                                                          'DEFAULT_MARGIN_Y') and drawio_layout.DEFAULT_MARGIN_Y else 20.0,
                          info_lbl_abs_y)
     dev_info_lbl_cell = drawio_utils.create_vertex_cell(info_lbl_id, "1", full_dev_lbl_html, info_lbl_abs_x,
-                                                        info_lbl_abs_y, info_lbl_w, info_lbl_h, styles.info_label,
+                                                        info_lbl_abs_y, info_label_width, info_lbl_h, styles.info_label,
                                                         connectable="0");
     global_root_cell.append(dev_info_lbl_cell)
     logger.info(f"✓ DrawIO: Urządzenie {current_host_identifier} dynamicznie przetworzone i dodane.")

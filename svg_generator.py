@@ -38,10 +38,11 @@ SVG_PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER = 3.0
 SVG_INFO_LABEL_MARGIN_FROM_CHASSIS = 25.0;
 SVG_INFO_LABEL_MIN_WIDTH = 180.0;
 SVG_INFO_LABEL_PADDING = "5px"
+SVG_INFO_LABEL_MAX_WIDTH = 280.0
 
 
 def _parse_drawio_style_string_for_svg(style_string: str, default_fill: str = "white", default_stroke: str = "black",
-                                       default_stroke_width: str = "1") -> Dict[str, str]:
+                                       default_stroke_width: str = "1") -> Dict[str, str]:  # ... (bez zmian) ...
     attrs = {"fill": default_fill, "stroke": default_stroke, "stroke-width": default_stroke_width};
     style_dict: Dict[str, str] = {}
     if not style_string: return attrs
@@ -59,7 +60,7 @@ def _parse_drawio_style_string_for_svg(style_string: str, default_fill: str = "w
     return attrs
 
 
-class SVGDiagram:
+class SVGDiagram:  # ... (definicja klasy i __init__ bez zmian, jak w ostatniej poprawionej wersji) ...
     def __init__(self, width: float = 2000, height: float = 1500):
         self.width = width;
         self.height = height
@@ -73,18 +74,18 @@ class SVGDiagram:
         default_font_family = "Arial, Helvetica, sans-serif"
         style_el.text = f"""svg {{ font-family: {default_font_family}; }}
             .port-label {{ font-size: {SVG_PORT_LABEL_FONT_SIZE}; text-anchor: middle; dominant-baseline: central; fill: {SVG_DEFAULT_TEXT_COLOR}; }}
-            .alias-label-rotated {{ font-size: {SVG_ALIAS_FONT_SIZE}; fill: {SVG_DEFAULT_TEXT_COLOR}; writing-mode: tb; glyph-orientation-vertical: 0; }}
+            .alias-label-rotated {{ font-size: {SVG_ALIAS_FONT_SIZE}; fill: {SVG_DEFAULT_TEXT_COLOR}; /* text-anchor i transform ustawiane w kodzie */ }}
             .alias-label-horizontal {{ font-size: {SVG_ALIAS_FONT_SIZE}; fill: {SVG_DEFAULT_TEXT_COLOR}; text-anchor: start; dominant-baseline: middle; }}
             .info-label-foreign-object div {{ font-family: {default_font_family}; font-size: {SVG_INFO_TEXT_FONT_SIZE}; line-height: {LABEL_LINE_HEIGHT + 2}px; color: {SVG_DEFAULT_TEXT_COLOR}; padding: {SVG_INFO_LABEL_PADDING}; border-radius: 6px; box-sizing: border-box; }}
             .info-label-foreign-object b {{ font-size: {SVG_INFO_TITLE_FONT_SIZE}; font-weight: bold; }}
             .info-label-foreign-object i {{ font-style: italic; color: #555; }} 
-            .ports-limit-note {{ font-size: 7px; color: #DD7700; font-style: italic; }}
+            .ports-limit-note {{ font-size: 7.5px; color: #DD7700; font-style: italic; }} 
             .info-label-foreign-object hr {{ border: 0; border-top: 0.5px solid {SVG_INFO_HR_COLOR}; margin: 3px 0; }}
-            .status-dot {{ font-size: 10px; vertical-align: middle; }}
+            .status-dot {{ font-size: 10px; vertical-align: middle; }} 
             .connection-label {{ font-size: {SVG_CONNECTION_LABEL_FONT_SIZE}; fill: {SVG_DEFAULT_TEXT_COLOR}; text-anchor: middle; paint-order: stroke; stroke: white; stroke-width: 2.5px; stroke-opacity:0.85;}}"""
         logger.debug("SVGDiagram zainicjalizowany.")
 
-    def update_dimensions(self, width: float, height: float):
+    def update_dimensions(self, width: float, height: float):  # ... (bez zmian) ...
         self.width = width;
         self.height = height;
         self.svg_root.set("width", str(self.width));
@@ -97,7 +98,7 @@ class SVGDiagram:
     def add_element(self, element: ET.Element):
         self.svg_root.append(element)
 
-    def get_svg_string(self) -> str:
+    def get_svg_string(self) -> str:  # ... (bez zmian) ...
         try:
             if hasattr(ET, 'indent'): ET.indent(self.svg_root, space="  ")
         except AttributeError:
@@ -118,6 +119,7 @@ def svg_add_device_to_diagram(
         logger.error(f"SVG: Krytyczny błąd przygotowania danych dla '{device_api_info.get('hostname')}': {e}. Pomijam.",
                      exc_info=True);
         return None
+
     current_host_identifier = prepared_data.canonical_identifier
     logger.info(
         f"SVG: Dodawanie urządzenia: {current_host_identifier} (idx: {device_internal_idx}) na ({offset_x:.0f}, {offset_y:.0f})")
@@ -129,24 +131,26 @@ def svg_add_device_to_diagram(
                                   {"x": "0", "y": "0", "width": str(chassis_width), "height": str(chassis_height),
                                    **chassis_svg_attrs});
     device_group_main_svg.append(chassis_rect_svg)
+
     ports_to_draw = prepared_data.physical_ports_for_chassis_layout
     num_layout_rows, ports_per_row_config = prepared_data.chassis_layout.num_rows, prepared_data.chassis_layout.ports_per_row
     ports_in_rows_dist: List[int] = []
-    if ports_to_draw:
+    if ports_to_draw:  # ... (logika dystrybucji portów - bez zmian)
         if num_layout_rows == 1:
             ports_in_rows_dist.append(len(ports_to_draw))
         elif num_layout_rows == 2:
-            r1_c = math.ceil(len(ports_to_draw) / 2.0)
-            ports_in_rows_dist.append(int(r1_c))
+            r1_c = math.ceil(len(ports_to_draw) / 2.0);
+            ports_in_rows_dist.append(int(r1_c));
             ports_in_rows_dist.append(len(ports_to_draw) - int(r1_c))
         else:
             if num_layout_rows > 0:
                 rem_p = len(ports_to_draw)
                 for _ in range(num_layout_rows):
-                    c_tr = min(rem_p, ports_per_row_config)
-                    ports_in_rows_dist.append(c_tr)
-                    rem_p -= c_tr
-                    if rem_p <= 0: break
+                    c_tr = min(rem_p, ports_per_row_config);
+                    ports_in_rows_dist.append(c_tr);
+                    rem_p -= c_tr;
+                    if rem_p <= 0: break  # Poprawiony warunek if
+
     cur_port_idx = 0
     for row_idx, num_ports_row in enumerate(ports_in_rows_dist):
         if num_ports_row == 0: continue
@@ -195,29 +199,53 @@ def svg_add_device_to_diagram(
             if p_id_api is not None: port_map_for_device_svg[f"portid_{p_id_api}"] = ep_data
             if p_name_api: port_map_for_device_svg[p_name_api.lower()] = ep_data
             port_map_for_device_svg[vis_num_str] = ep_data
+
             alias_txt = str(p_info.get("ifAlias", "")).strip()
             if alias_txt:
-                aux_sx, aux_ex = offset_x + center_x_p_rel, offset_x + center_x_p_rel;
-                lbl_x, lbl_y, txt_anc, trans = 0.0, 0.0, "middle", ""
+                aux_sx_abs, aux_ex_abs = offset_x + center_x_p_rel, offset_x + center_x_p_rel
+                label_x_abs, label_y_abs = 0.0, 0.0
+                text_anchor_svg = "middle"
+                transform_svg = ""
+                alias_label_class = "alias-label-horizontal"  # Domyślnie dla mgmt0 (orientacja right/left)
+
+                # ZMIANA: Przywrócenie logiki obracania dla linii pionowych
                 if conn_orient == "up":
-                    aux_sy, aux_ey = offset_y, offset_y - SVG_PORT_ALIAS_LINE_EXTENSION; lbl_x, lbl_y = aux_ex + SVG_PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER, aux_ey - SVG_PORT_ALIAS_LABEL_OFFSET_FROM_LINE; txt_anc, trans = "end", f"rotate(-90 {lbl_x:.2f} {lbl_y:.2f})"
-                else:
-                    aux_sy, aux_ey = offset_y + chassis_height, offset_y + chassis_height + SVG_PORT_ALIAS_LINE_EXTENSION; lbl_x, lbl_y = aux_ex + SVG_PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER, aux_ey + SVG_PORT_ALIAS_LABEL_OFFSET_FROM_LINE; txt_anc, trans = "start", f"rotate(-90 {lbl_x:.2f} {lbl_y:.2f})"
+                    aux_sy_abs, aux_ey_abs = offset_y + py, offset_y + py - SVG_PORT_ALIAS_LINE_EXTENSION
+                    alias_label_class = "alias-label-rotated"
+                    label_x_abs = aux_ex_abs + SVG_PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER
+                    label_y_abs = aux_ey_abs + SVG_PORT_ALIAS_LABEL_OFFSET_FROM_LINE  # Dostosuj pozycję Y dla obróconego tekstu
+                    text_anchor_svg = "start"  # Początek tekstu (dół po obrocie)
+                    transform_svg = f"rotate(-90, {label_x_abs:.2f}, {label_y_abs:.2f})"
+                elif conn_orient == "down":
+                    aux_sy_abs, aux_ey_abs = offset_y + py + PORT_HEIGHT, offset_y + py + PORT_HEIGHT + SVG_PORT_ALIAS_LINE_EXTENSION
+                    alias_label_class = "alias-label-rotated"
+                    label_x_abs = aux_ex_abs + SVG_PORT_ALIAS_LABEL_X_OFFSET_FROM_LINE_CENTER
+                    label_y_abs = aux_ey_abs - SVG_PORT_ALIAS_LABEL_OFFSET_FROM_LINE  # Dostosuj pozycję Y
+                    text_anchor_svg = "end"  # Koniec tekstu (góra po obrocie)
+                    transform_svg = f"rotate(-90, {label_x_abs:.2f}, {label_y_abs:.2f})"
+
                 aux_attrs = _parse_drawio_style_string_for_svg(drawio_styles_ref.aux_line);
-                aux_line = ET.Element("line", {"x1": f"{aux_sx:.2f}", "y1": f"{aux_sy:.2f}", "x2": f"{aux_ex:.2f}",
-                                               "y2": f"{aux_ey:.2f}", **aux_attrs});
+                aux_line = ET.Element("line",
+                                      {"x1": f"{aux_sx_abs:.2f}", "y1": f"{aux_sy_abs:.2f}", "x2": f"{aux_ex_abs:.2f}",
+                                       "y2": f"{aux_ey_abs:.2f}", **aux_attrs});
                 svg_diagram.add_element(aux_line)
-                alias_lbl = ET.Element("text",
-                                       {"x": f"{lbl_x:.2f}", "y": f"{lbl_y:.2f}", "class": "alias-label-rotated",
-                                        "text-anchor": txt_anc, "transform": trans})
-                disp_alias = alias_txt.split('\n')[0];
-                alias_lbl.text = disp_alias[:18] + ".." if len(disp_alias) > 20 else disp_alias;
+
+                alias_lbl_attrs = {"x": f"{label_x_abs:.2f}", "y": f"{label_y_abs:.2f}", "class": alias_label_class,
+                                   "text-anchor": text_anchor_svg}
+                if transform_svg: alias_lbl_attrs["transform"] = transform_svg
+                alias_lbl = ET.Element("text", alias_lbl_attrs)
+
+                display_alias_svg = alias_txt.split('\n')[0]
+                max_len_alias = 15 if alias_label_class == "alias-label-rotated" else 25
+                if len(display_alias_svg) > max_len_alias: display_alias_svg = display_alias_svg[
+                                                                               :max_len_alias - 2] + ".."
+                alias_lbl.text = display_alias_svg
                 svg_diagram.add_element(alias_lbl)
             cur_port_idx += 1
         if cur_port_idx >= len(ports_to_draw): break
 
     mgmt0_info = prepared_data.mgmt0_port_info
-    if mgmt0_info:
+    if mgmt0_info:  # ... (logika rysowania mgmt0 - aliasy pozostają poziome, co jest zazwyczaj OK dla mgmt0) ...
         logger.debug(f"  SVG: Dodawanie portu mgmt0 dla {current_host_identifier}...")
         mgmt0_x, mgmt0_y = chassis_width + HORIZONTAL_SPACING, chassis_height / 2 - PORT_HEIGHT / 2
         mgmt0_ifidx, mgmt0_pid = mgmt0_info.get('ifIndex'), mgmt0_info.get('port_id')
@@ -251,21 +279,27 @@ def svg_add_device_to_diagram(
         port_map_for_device_svg["mgmt0"] = ep_data_m
         alias_txt_m = str(mgmt0_info.get("ifAlias", "")).strip()
         if alias_txt_m:
-            aux_sx_m, aux_sy_m = offset_x + mgmt0_x + PORT_WIDTH, offset_y + mgmt0_y + PORT_HEIGHT / 2;
-            aux_ex_m, aux_ey_m = aux_sx_m + SVG_PORT_ALIAS_LINE_EXTENSION, aux_sy_m
+            aux_sx_m_abs = offset_x + mgmt0_x + PORT_WIDTH
+            aux_sy_m_abs = offset_y + mgmt0_y + PORT_HEIGHT / 2
+            aux_ex_m_abs = aux_sx_m_abs + SVG_PORT_ALIAS_LINE_EXTENSION
+            aux_ey_m_abs = aux_sy_m_abs
+            label_x_m_abs = aux_ex_m_abs + SVG_PORT_ALIAS_LABEL_OFFSET_FROM_LINE
+            label_y_m_abs = aux_ey_m_abs
+            text_anchor_m = "start"  # Alias dla mgmt0 zawsze poziomy, wyrównany do początku
             aux_attrs_m = _parse_drawio_style_string_for_svg(drawio_styles_ref.aux_line);
-            mgmt0_aux_line = ET.Element("line",
-                                        {"x1": f"{aux_sx_m:.2f}", "y1": f"{aux_sy_m:.2f}", "x2": f"{aux_ex_m:.2f}",
-                                         "y2": f"{aux_ey_m:.2f}", **aux_attrs_m});
+            mgmt0_aux_line = ET.Element("line", {"x1": f"{aux_sx_m_abs:.2f}", "y1": f"{aux_sy_m_abs:.2f}",
+                                                 "x2": f"{aux_ex_m_abs:.2f}", "y2": f"{aux_ey_m_abs:.2f}",
+                                                 **aux_attrs_m});
             svg_diagram.add_element(mgmt0_aux_line)
-            lbl_x_m, lbl_y_m = aux_ex_m + SVG_PORT_ALIAS_LABEL_OFFSET_FROM_LINE, aux_ey_m
-            mgmt0_alias_lbl = ET.Element("text", {"x": f"{lbl_x_m:.2f}", "y": f"{lbl_y_m:.2f}",
-                                                  "class": "alias-label-horizontal"});
+            mgmt0_alias_lbl = ET.Element("text", {"x": f"{label_x_m_abs:.2f}", "y": f"{label_y_m_abs:.2f}",
+                                                  "class": "alias-label-horizontal", "text-anchor": text_anchor_m});
             mgmt0_alias_lbl.text = alias_txt_m;
             svg_diagram.add_element(mgmt0_alias_lbl)
     svg_diagram.add_element(device_group_main_svg)
 
-    dev_api, dev_id_val = prepared_data.device_api_info, prepared_data.device_api_info.get('device_id', 'N/A')
+    # --- ETYKIETA INFORMACYJNA (foreignObject) - zmiana szerokości ---
+    dev_api, dev_id_val = prepared_data.device_api_info, prepared_data.device_api_info.get('device_id',
+                                                                                           'N/A')  # ... (reszta logiki etykiety bez zmian, jak w poprzedniej odpowiedzi)
     hostname_raw, ip_raw, purpose_raw = dev_api.get('hostname', ''), dev_api.get('ip', ''), dev_api.get('purpose', '')
     display_name_main = prepared_data.canonical_identifier
     if prepared_data.is_stack: display_name_main += " (STACK)"
@@ -305,9 +339,8 @@ def svg_add_device_to_diagram(
         return el
 
     add_text_node_xhtml(xhtml_div, display_name_main, is_bold=True);
-    if prepared_data.ports_display_limited:
-        ET.SubElement(xhtml_div, f"{{{xhtml_ns}}}br")
-        add_text_node_xhtml(xhtml_div, ports_limit_info_text_svg, tag="small", class_name="ports-limit-note")
+    if prepared_data.ports_display_limited: ET.SubElement(xhtml_div, f"{{{xhtml_ns}}}br"); add_text_node_xhtml(
+        xhtml_div, ports_limit_info_text_svg, tag="small", class_name="ports-limit-note")
     ET.SubElement(xhtml_div, f"{{{xhtml_ns}}}br");
     add_text_node_xhtml(xhtml_div, f"ID: {dev_id_val}");
     if extra_info_svg: ET.SubElement(xhtml_div, f"{{{xhtml_ns}}}br"); add_text_node_xhtml(xhtml_div,
@@ -319,12 +352,12 @@ def svg_add_device_to_diagram(
     phys_div = ET.SubElement(xhtml_div, f"{{{xhtml_ns}}}div", {
         "style": f"max-height:{PHYSICAL_PORT_LIST_MAX_HEIGHT}px; overflow-y:auto; overflow-x:hidden;"})
     if prepared_data.all_physical_ports:
-        for p_port_info in prepared_data.all_physical_ports:  # Zmieniono nazwę zmiennej p na p_port_info
+        for p_port_info in prepared_data.all_physical_ports:
             line_div = ET.SubElement(phys_div, f"{{{xhtml_ns}}}div");
             dot_span = ET.SubElement(line_div, f"{{{xhtml_ns}}}span", {"class": "status-dot"})
-            s_op = str(p_port_info.get("ifOperStatus", "u")).lower()  # Zmieniono s na s_op
-            aS_adm = str(p_port_info.get("ifAdminStatus", "u")).lower()  # Zmieniono aS na aS_adm
-            s_color_hex = drawio_styles_ref.port_unknown_fill  # Zmieniono s_color na s_color_hex
+            s_op = str(p_port_info.get("ifOperStatus", "u")).lower();
+            aS_adm = str(p_port_info.get("ifAdminStatus", "u")).lower();
+            s_color_hex = drawio_styles_ref.port_unknown_fill
             if aS_adm == "down":
                 s_color_hex = drawio_styles_ref.port_shutdown_fill
             elif s_op == "up":
@@ -351,7 +384,7 @@ def svg_add_device_to_diagram(
             line_div_l = ET.SubElement(log_div, f"{{{xhtml_ns}}}div");
             dot_span_l = ET.SubElement(line_div_l, f"{{{xhtml_ns}}}span", {"class": "status-dot"})
             s_l, aS_l = str(l_if.get('ifOperStatus', 'u')).lower(), str(l_if.get('ifAdminStatus', 'u')).lower();
-            s_color_l_hex = drawio_styles_ref.port_unknown_fill  # Zmieniono s_color_l
+            s_color_l_hex = drawio_styles_ref.port_unknown_fill
             if aS_l == "down":
                 s_color_l_hex = drawio_styles_ref.port_shutdown_fill
             elif s_l == "up":
@@ -367,7 +400,9 @@ def svg_add_device_to_diagram(
     else:
         add_text_node_xhtml(log_div, "(brak)")
 
-    info_w = max(chassis_width * 0.7, SVG_INFO_LABEL_MIN_WIDTH)
+    info_label_width_svg = min(max(chassis_width * 0.65, SVG_INFO_LABEL_MIN_WIDTH),
+                               SVG_INFO_LABEL_MAX_WIDTH)  # Użycie SVG_INFO_LABEL_MAX_WIDTH
+
     num_base_lines_info = 3 + len(extra_info_svg) + (1 if prepared_data.ports_display_limited else 0)
     base_h_info = num_base_lines_info * (LABEL_LINE_HEIGHT + 4) + 15
     phys_ports_section_h = min(PHYSICAL_PORT_LIST_MAX_HEIGHT,
@@ -375,11 +410,11 @@ def svg_add_device_to_diagram(
     logical_ifs_section_h = min(LOGICAL_IF_LIST_MAX_HEIGHT,
                                 max(25, len(prepared_data.logical_interfaces) * (LABEL_LINE_HEIGHT + 3))) + 30
     info_lbl_h = base_h_info + phys_ports_section_h + logical_ifs_section_h + 25
-    info_lbl_abs_x, info_lbl_abs_y = offset_x - info_w - SVG_INFO_LABEL_MARGIN_FROM_CHASSIS, offset_y + (
+    info_lbl_abs_x, info_lbl_abs_y = offset_x - info_label_width_svg - SVG_INFO_LABEL_MARGIN_FROM_CHASSIS, offset_y + (
                 chassis_height / 2) - (info_lbl_h / 2)
     info_lbl_abs_y = max((SVG_INFO_LABEL_MARGIN_FROM_CHASSIS / 2), info_lbl_abs_y)
     f_obj = ET.Element("foreignObject",
-                       {"x": f"{info_lbl_abs_x:.2f}", "y": f"{info_lbl_abs_y:.2f}", "width": str(info_w),
+                       {"x": f"{info_lbl_abs_x:.2f}", "y": f"{info_lbl_abs_y:.2f}", "width": str(info_label_width_svg),
                         "height": str(info_lbl_h)});
     f_obj.append(xhtml_div);
     svg_diagram.add_element(f_obj)
@@ -390,14 +425,11 @@ def svg_add_device_to_diagram(
 def svg_draw_connection(svg_diagram: SVGDiagram, src_ep: PortEndpointData, tgt_ep: PortEndpointData,
                         vlan_id: Optional[str], conn_idx: int):
     line_id, lbl_id = f"conn_line_svg_{conn_idx}", f"conn_label_svg_{conn_idx}"
-    x1, y1, o1 = src_ep.x, src_ep.y, src_ep.orientation
+    x1, y1, o1 = src_ep.x, src_ep.y, src_ep.orientation;
     x2, y2, o2 = tgt_ep.x, tgt_ep.y, tgt_ep.orientation
-
     path_data = f"M {x1:.2f} {y1:.2f} "
-    wp1x, wp1y = x1, y1
+    wp1x, wp1y = x1, y1;
     wp2x, wp2y = x2, y2
-
-    # Poprawiona logika - usunięto znaki ~
     if o1 == "up":
         wp1y -= WAYPOINT_OFFSET
     elif o1 == "down":
@@ -406,9 +438,7 @@ def svg_draw_connection(svg_diagram: SVGDiagram, src_ep: PortEndpointData, tgt_e
         wp1x -= WAYPOINT_OFFSET
     elif o1 == "right":
         wp1x += WAYPOINT_OFFSET
-
     path_data += f"L {wp1x:.2f} {wp1y:.2f} "
-
     if o2 == "up":
         wp2y -= WAYPOINT_OFFSET
     elif o2 == "down":
@@ -417,22 +447,15 @@ def svg_draw_connection(svg_diagram: SVGDiagram, src_ep: PortEndpointData, tgt_e
         wp2x -= WAYPOINT_OFFSET
     elif o2 == "right":
         wp2x += WAYPOINT_OFFSET
-
-    # Poprawiona logika rysowania ścieżki
-    if (o1 in ["up", "down"] and o2 in ["up", "down"]):  # Osie równoległe, oba pionowe
-        mid_y = (wp1y + wp2y) / 2
-        path_data += f"L {wp1x:.2f} {mid_y:.2f} "
-        path_data += f"L {wp2x:.2f} {mid_y:.2f} "
-    elif (o1 in ["left", "right"] and o2 in ["left", "right"]):  # Osie równoległe, oba poziome
-        mid_x = (wp1x + wp2x) / 2
-        path_data += f"L {mid_x:.2f} {wp1y:.2f} "
-        path_data += f"L {mid_x:.2f} {wp2y:.2f} "
-    else:  # Osie prostopadłe (L-kształt)
-        if o1 in ["up", "down"]:  # Start pionowy, koniec poziomy
+    if (o1 in ["up", "down"] and o2 in ["up", "down"]):
+        mid_y = (wp1y + wp2y) / 2; path_data += f"L {wp1x:.2f} {mid_y:.2f} L {wp2x:.2f} {mid_y:.2f} "
+    elif (o1 in ["left", "right"] and o2 in ["left", "right"]):
+        mid_x = (wp1x + wp2x) / 2; path_data += f"L {mid_x:.2f} {wp1y:.2f} L {mid_x:.2f} {wp2y:.2f} "
+    else:
+        if o1 in ["up", "down"]:
             path_data += f"L {wp1x:.2f} {wp2y:.2f} "
-        else:  # Start poziomy, koniec pionowy (o1 in ["left", "right"])
+        else:
             path_data += f"L {wp2x:.2f} {wp1y:.2f} "
-
     path_data += f"L {wp2x:.2f} {wp2y:.2f} L {x2:.2f} {y2:.2f}"
     conn_path = ET.Element("path", {"id": line_id, "d": path_data, "stroke": SVG_STROKE_MAP.get("#FF9900", "orange"),
                                     "stroke-width": "1.5", "fill": "none"});
@@ -442,10 +465,9 @@ def svg_draw_connection(svg_diagram: SVGDiagram, src_ep: PortEndpointData, tgt_e
         txt_anc = "middle"
         delta_x = abs(wp1x - wp2x);
         delta_y = abs(wp1y - wp2y)
-        if delta_x < 10 and delta_y > 0:  # Bardziej pionowa
-            lbl_x += 5
-            txt_anc = "start" if wp1x <= wp2x else "end"
-        elif delta_y < 10 and delta_x > 0:  # Bardziej pozioma
+        if delta_x < 10 and delta_y > 0:
+            lbl_x += 5; txt_anc = "start"
+        elif delta_y < 10 and delta_x > 0:
             lbl_y -= 3
         vlan_txt = ET.Element("text",
                               {"id": lbl_id, "x": f"{lbl_x:.2f}", "y": f"{lbl_y:.2f}", "class": "connection-label",
