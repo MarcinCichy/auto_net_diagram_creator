@@ -6,7 +6,7 @@ from netmiko import ConnectHandler, NetmikoAuthenticationException, NetmikoTimeo
 
 logger = logging.getLogger(__name__)
 
-# --- Prekompilowane wyrażenia regularne (POPRAWIONE) ---
+# --- Prekompilowane wyrażenia regularne ---
 RE_LLDP_HEADER_CANDIDATE = re.compile(r'(Device ID\s+Local Intf\s+Hold-time|Chassis id:)', re.IGNORECASE)
 RE_LLDP_BLOCK_SPLIT = re.compile(r'\n\s*(?=Chassis id:)', flags=re.IGNORECASE)
 RE_LLDP_LOCAL_PORT_ID = re.compile(r'^Local Port id:\s*(.+?)\s*$', re.MULTILINE | re.IGNORECASE)
@@ -21,7 +21,9 @@ RE_CDP_LOCAL_IF = re.compile(r'Interface:\s*([^,]+(?:,\s*port\s+\S+)?)', re.IGNO
 RE_CDP_REMOTE_IF = re.compile(r'(?:Port ID|Outgoing Port):\s*(\S+)', re.IGNORECASE)
 
 RE_SLOT_SYS_PROMPT = re.compile(r'(?:\*\s*)?Slot-\d+\s+[\w.-]+\s*#\s*$')
-RE_SIMPLE_PROMPT = re.compile(r"^[>#]\s*$")
+RE_SIMPLE_PROMPT = re.compile(r"^[a-zA-Z0-9][\w.-]*[>#]\s*$")
+RE_NXOS_PROMPT = re.compile(r"^[a-zA-Z0-9][\w.-]*#\s*$")
+RE_IOS_PROMPT = re.compile(r"^[a-zA-Z0-9][\w.-]*[>#]\s*$")
 
 
 def _normalize_interface_name(if_name: str) -> str:
@@ -38,7 +40,6 @@ def _parse_lldp_output(lldp_output: str, local_hostname: str) -> List[Dict[str, 
     connections: List[Dict[str, Any]] = []
     if not lldp_output: return connections
     logger.debug(f"CLI-LLDP: Próba parsowania danych LLDP dla {local_hostname} (długość: {len(lldp_output)})...")
-
     data_to_parse = lldp_output
     first_marker = RE_LLDP_HEADER_CANDIDATE.search(lldp_output)
     if first_marker:
@@ -50,7 +51,8 @@ def _parse_lldp_output(lldp_output: str, local_hostname: str) -> List[Dict[str, 
                 data_to_parse = lldp_output[first_chassis_after_header.start():]
             else:
                 logger.warning(
-                    f"CLI-LLDP: Znaleziono nagłówek, ale brak bloków 'Chassis id:' w {local_hostname}."); return connections
+                    f"CLI-LLDP: Znaleziono nagłówek, ale brak bloków 'Chassis id:' w {local_hostname}.")
+                return connections
     elif not data_to_parse.strip().lower().startswith('chassis id:'):
         logger.info(f"CLI-LLDP: Brak nagłówka LLDP i dane nie zaczynają się od 'Chassis id:' dla {local_hostname}.")
 
@@ -60,17 +62,14 @@ def _parse_lldp_output(lldp_output: str, local_hostname: str) -> List[Dict[str, 
         if lldp_output.strip(): logger.debug(
             f"CLI-LLDP: Niesparsowane dane LLDP dla {local_hostname}:\n{lldp_output[:500]}...")
         return connections
-
     parsed_count = 0
     for block_idx, block_content in enumerate(blocks):
         block_strip = block_content.strip()
-        if not block_strip:
-            if block_idx == 0 and len(blocks) > 1:
-                logger.debug(f"CLI-LLDP: Pomijam pusty pierwszy blok dla {local_hostname}.")
-            elif block_idx > 0:
-                logger.warning(f"CLI-LLDP: Pusty blok LLDP (idx: {block_idx}) dla {local_hostname}.")
+        if not block_strip or (block_idx == 0 and not block_strip.lower().startswith('chassis id:')):
+            if block_strip and block_idx == 0: logger.debug(
+                f"CLI-LLDP: Pomijam pierwszy blok (nie 'Chassis id:') dla {local_hostname}.")
             continue
-        if not block_strip.lower().startswith('chassis id:'): logger.debug(
+        if block_idx > 0 and not block_strip.lower().startswith('chassis id:'): logger.debug(
             f"CLI-LLDP: Pomijam blok #{block_idx} (nie 'Chassis id:') dla {local_hostname}:\n{block_strip[:100]}..."); continue
         local_if_match, remote_sys_match, remote_port_id_match = RE_LLDP_LOCAL_PORT_ID.search(
             block_strip), RE_LLDP_SYS_NAME.search(block_strip), RE_LLDP_REMOTE_PORT_ID.search(block_strip)
@@ -127,81 +126,160 @@ def _parse_cdp_output(cdp_output: str, local_hostname: str) -> List[Dict[str, An
 
 
 def cli_get_neighbors_enhanced(host: str, username: str, password: str) -> List[Dict[str, Any]]:
-    if not host or not username or not password: logger.warning(
-        f"CLI: Brak danych logowania dla '{host}'. Pomijam."); return []
+    if not host or not username or not password:
+        logger.warning(f"CLI: Brak danych logowania dla '{host}'. Pomijam.")
+        return []
     logger.info(f"⟶ CLI: Próba odkrycia sąsiadów dla {host}")
-    device_params: Dict[str, Any] = {"device_type": "autodetect", "host": host, "username": username,
-                                     "password": password, "global_delay_factor": 4,
-                                     "session_log": f"{host}_netmiko_session.log", "session_log_file_mode": "append",
-                                     "conn_timeout": 60, "auth_timeout": 75, "banner_timeout": 60}
-    all_cli_connections: List[Dict[str, Any]] = [];
+    device_params: Dict[str, Any] = {
+        "device_type": "autodetect",
+        "host": host,
+        "username": username,
+        "password": password,
+        "global_delay_factor": 4,
+        "session_log": f"{host}_netmiko_session.log",
+        "session_log_file_mode": "append",
+        "conn_timeout": 60,
+        "auth_timeout": 75,
+        "banner_timeout": 60
+    }
+    all_cli_connections: List[Dict[str, Any]] = []
     net_connect: Optional[ConnectHandler] = None
-    effective_device_type = "";
+    effective_device_type = ""
     base_prompt_log = "N/A (nie odczytano)"
+
     try:
         logger.info(f"  CLI: Łączenie z {host} (gdf={device_params['global_delay_factor']})...")
         net_connect = ConnectHandler(**device_params)
         effective_device_type = net_connect.device_type
         try:
-            if net_connect.base_prompt: base_prompt_log = net_connect.base_prompt
+            if net_connect.base_prompt:
+                base_prompt_log = net_connect.base_prompt.strip()
         except Exception as e_bp:
-            logger.warning(
-                f"  CLI: Wyjątek przy odczycie base_prompt dla {host}: {e_bp}"); base_prompt_log = "N/A (błąd)"
+            logger.warning(f"  CLI: Wyjątek przy odczycie base_prompt dla {host}: {e_bp}")
+            base_prompt_log = "N/A (błąd)"
         logger.info(f"  CLI: Połączono z {host} (Typ Netmiko: '{effective_device_type}')")
         logger.info(f"  CLI: Netmiko base_prompt: '{base_prompt_log}'")
 
-        lldp_cmd, cdp_cmd = "show lldp neighbors detail", "show cdp neighbors detail"
-        lldp_exp_str: Optional[str] = None;
-        cdp_exp_str: Optional[str] = None;
+        system_info_str = ""
+        show_ver_expect_str: Optional[str] = None
+
+        if base_prompt_log not in ["N/A", "N/A (nie odczytano)", "N/A (błąd)"]:
+            if RE_SLOT_SYS_PROMPT.fullmatch(base_prompt_log) or \
+                    RE_NXOS_PROMPT.fullmatch(base_prompt_log) or \
+                    RE_IOS_PROMPT.fullmatch(base_prompt_log) or \
+                    not RE_SIMPLE_PROMPT.fullmatch(base_prompt_log):
+                show_ver_expect_str = base_prompt_log
+
+        if not show_ver_expect_str and base_prompt_log in ["N/A", "N/A (nie odczytano)", "N/A (błąd)"]:
+            show_ver_expect_str = r"[a-zA-Z0-9][\w.-]*[#>]+\s*$"
+
+        try:
+            logger.debug(
+                f"  CLI: Próba pobrania 'show version' z {host} (expect_string: '{show_ver_expect_str if show_ver_expect_str else 'Domyślny Netmiko'}')...")
+            show_version_params = {"read_timeout": 45}
+            if show_ver_expect_str:
+                show_version_params["expect_string"] = show_ver_expect_str
+
+            show_version_output = net_connect.send_command("show version", **show_version_params)
+            if show_version_output and isinstance(show_version_output, str):
+                system_info_str = show_version_output.lower()
+                logger.debug(f"  CLI: Otrzymano 'show version' (fragment): {system_info_str[:250]}")
+            else:
+                logger.warning(f"  CLI: Nie udało się uzyskać wyjścia 'show version' lub było puste dla {host}.")
+        except Exception as e_ver:
+            logger.warning(f"  CLI: Błąd podczas próby wykonania 'show version' na {host}: {e_ver}")
+
+        lldp_cmd = "show lldp neighbors detail"
+        cdp_cmd = "show cdp neighbors detail"
+        lldp_exp_str: Optional[str] = None
+        cdp_exp_str: Optional[str] = None
         run_cdp = True
 
-        extreme_sigs = ["extreme_exos", "extreme_netiron", "extreme_ers", "extreme_vsp", "extreme_wing"]
-        is_extreme_type = any(sig in effective_device_type.lower() for sig in extreme_sigs)
-        is_extreme_prompt = base_prompt_log not in ["N/A", "N/A (błąd)"] and bool(
+        is_extreme_type_sig = any(sig in effective_device_type.lower() for sig in
+                                  ["extreme_exos", "extreme_vsp", "extreme_netiron", "extreme_ers", "extreme_wing"])
+        is_extreme_sysinfo = "extreme" in system_info_str or "extremexos" in system_info_str
+        is_extreme_prompt_match = base_prompt_log not in ["N/A", "N/A (nie odczytano)", "N/A (błąd)"] and bool(
             RE_SLOT_SYS_PROMPT.fullmatch(base_prompt_log))
-        is_extreme_like = is_extreme_type or is_extreme_prompt
+        is_extreme_like = is_extreme_type_sig or is_extreme_sysinfo or is_extreme_prompt_match
 
         logger.info(
-            f"  CLI: {host} traktowane jako Extreme-like: {is_extreme_like} (typ: {is_extreme_type} ['{effective_device_type}'], prompt: {is_extreme_prompt} ['{base_prompt_log}'])")
+            f"  CLI: {host} traktowane jako Extreme-like: {is_extreme_like} "
+            f"(wg typu: {is_extreme_type_sig} ['{effective_device_type}'], "
+            f"wg 'show version': {is_extreme_sysinfo}, "
+            f"wg promptu: {is_extreme_prompt_match} ['{base_prompt_log}'])"
+        )
 
         if is_extreme_like:
-            desc_reason = effective_device_type if is_extreme_type else "wykryto po prompcie pasującym do Extreme"
-            logger.info(f"  CLI: Ustawienia Extreme dla {host} (powód: {desc_reason}).")
-            lldp_cmd, lldp_exp_str, run_cdp = "show lldp neighbors detailed", RE_SLOT_SYS_PROMPT.pattern, False
-            logger.info(f"  CLI: LLDP cmd: '{lldp_cmd}', expect: '{lldp_exp_str}', CDP pominięte.")
-            if "extreme_exos" in effective_device_type:
-                try:
-                    logger.debug(f"  CLI: Próba wysłania 'disable clipaging' dla {host} (EXOS).")
-                    # Użycie send_command_timing jest bezpieczniejsze dla komend, które nie zwracają wiele wyjścia
-                    # lub gdy chcemy uniknąć problemów z detekcją promptu po tej jednej komendzie.
-                    net_connect.send_command_timing("disable clipaging", read_timeout=15)
-                except Exception as e_paging_exos:
-                    logger.warning(f"  CLI: Wyjątek przy 'disable clipaging' dla {host}: {e_paging_exos}")
-            elif hasattr(net_connect, 'disable_paging') and callable(net_connect.disable_paging):
-                try:
-                    logger.debug(f"  CLI: Próba net_connect.disable_paging() dla {host}."); net_connect.disable_paging()
-                except Exception as e_dp:
-                    logger.warning(f"  CLI: Wyjątek przy disable_paging() dla {host}: {e_dp}")
-        elif "junos" in effective_device_type:
-            lldp_cmd = "show lldp neighbors interface all detail"
-        elif "cisco_nxos" in effective_device_type:
-            logger.info(f"  CLI: Ustawienia Cisco NX-OS dla {host}.");
-            lldp_cmd = "show lldp neighbors"
-        elif base_prompt_log not in ["N/A", "N/A (błąd)"] and not RE_SIMPLE_PROMPT.fullmatch(base_prompt_log):
-            logger.info(
-                f"  CLI: Używam base_prompt ('{base_prompt_log}') jako expect_string dla {host} (typ: {effective_device_type}).")
-            lldp_exp_str = base_prompt_log;
-            cdp_exp_str = base_prompt_log
-
-        if base_prompt_log in ["N/A", "N/A (błąd)"] and not is_extreme_like:
-            logger.warning(
-                f"  CLI: base_prompt nieustalony i nie Extreme dla {host}. Próbuję z RE_SLOT_SYS_PROMPT jako fallback.")
+            platform_reason = "wykryto jako Extreme (typ/prompt/sysinfo)"
+            logger.info(f"  CLI: Ustawienia Extreme dla {host} (powód: {platform_reason}).")
+            lldp_cmd = "show lldp neighbors detailed"
+            cdp_cmd = "show cdp neighbor detail"  # Poprawiona komenda CDP dla Extreme
             lldp_exp_str = RE_SLOT_SYS_PROMPT.pattern
-            if run_cdp: cdp_exp_str = RE_SLOT_SYS_PROMPT.pattern
+            cdp_exp_str = RE_SLOT_SYS_PROMPT.pattern  # Użyj tego samego expect dla CDP na Extreme
+            run_cdp = True  # Spróbujemy CDP z poprawioną komendą
 
-        lldp_params = {"read_timeout": 180};
-        if lldp_exp_str: lldp_params["expect_string"] = lldp_exp_str
-        logger.info(f"  CLI: LLDP dla {host}: cmd='{lldp_cmd}', params={lldp_params}")
+            # Wyłącz paginację dla ExtremeXOS
+            # Sprawdź, czy 'disable clipaging' jest odpowiednie; może być 'disable session paging'
+            # Dla bezpieczeństwa, jeśli typ jest rozpoznany jako EXOS przez Netmiko lub z 'show version'
+            if "extreme_exos" in effective_device_type.lower() or "extremexos" in system_info_str:
+                try:
+                    logger.debug(f"  CLI: Próba 'disable clipaging' dla {host} (EXOS).")
+                    net_connect.send_command("disable clipaging", expect_string=lldp_exp_str, read_timeout=20)
+                    logger.info(f"  CLI: Prawdopodobnie wysłano 'disable clipaging' dla {host}.")
+                except Exception as e_pg:
+                    logger.warning(f"  CLI: Wyjątek przy 'disable clipaging' dla {host}: {e_pg}")
+
+        elif "nx-os" in system_info_str or "cisco_nxos" in effective_device_type.lower():
+            platform_reason = "wykryto jako Cisco NX-OS"
+            logger.info(f"  CLI: Ustawienia Cisco NX-OS dla {host} (powód: {platform_reason}).")
+            lldp_cmd = "show lldp neighbors detail"
+            if base_prompt_log not in ["N/A", "N/A (nie odczytano)", "N/A (błąd)"]:
+                lldp_exp_str = RE_NXOS_PROMPT.pattern if RE_NXOS_PROMPT.fullmatch(base_prompt_log) else base_prompt_log
+                if run_cdp and lldp_exp_str: cdp_exp_str = lldp_exp_str
+
+        elif ("ios" in system_info_str and "xr" not in system_info_str and (
+                "cisco_ios" in effective_device_type.lower() or "cisco_xe" in effective_device_type.lower())) or "catalyst" in system_info_str:
+            platform_reason = "wykryto jako Cisco IOS/XE"
+            logger.info(f"  CLI: Ustawienia Cisco IOS/XE dla {host} (powód: {platform_reason}).")
+            if base_prompt_log not in ["N/A", "N/A (nie odczytano)", "N/A (błąd)"]:
+                lldp_exp_str = RE_IOS_PROMPT.pattern if RE_IOS_PROMPT.fullmatch(base_prompt_log) else base_prompt_log
+                if run_cdp and lldp_exp_str: cdp_exp_str = lldp_exp_str
+            try:
+                logger.debug(f"  CLI: Próba 'terminal length 0' dla {host} (IOS/XE).")
+                net_connect.send_command_timing("terminal length 0", read_timeout=15)
+            except Exception as e_tl:
+                logger.warning(f"  CLI: Wyjątek przy 'terminal length 0' dla {host}: {e_tl}")
+
+        elif "junos" in system_info_str or "juniper" in system_info_str or "junos" in effective_device_type.lower():
+            platform_reason = "wykryto jako Junos"
+            logger.info(f"  CLI: Ustawienia Junos dla {host} (powód: {platform_reason}).")
+            lldp_cmd = "show lldp neighbors interface all detail";
+            lldp_exp_str = None
+            try:
+                logger.debug(f"  CLI: Próba 'set cli screen-length 0' dla {host} (Junos).")
+                net_connect.send_command_timing("set cli screen-length 0", read_timeout=15)
+            except Exception as e_sl:
+                logger.warning(f"  CLI: Wyjątek przy 'set cli screen-length 0' dla {host}: {e_sl}")
+
+        elif lldp_exp_str is None:  # Fallback, jeśli platforma nie została jawnie zidentyfikowana
+            if base_prompt_log in ["N/A", "N/A (nie odczytano)", "N/A (błąd)"]:
+                logger.warning(
+                    f"  CLI: Platforma nieznana i Netmiko nie ustaliło base_prompt dla {host}. Używam RE_SLOT_SYS_PROMPT jako fallback.")
+                lldp_exp_str = RE_SLOT_SYS_PROMPT.pattern
+                if run_cdp: cdp_exp_str = RE_SLOT_SYS_PROMPT.pattern
+            elif not RE_SIMPLE_PROMPT.fullmatch(base_prompt_log):
+                logger.info(
+                    f"  CLI: Platforma nieznana, używam ustalonego base_prompt ('{base_prompt_log}') jako expect_string.")
+                lldp_exp_str = base_prompt_log
+                if run_cdp: cdp_exp_str = base_prompt_log
+
+        logger.info(
+            f"  CLI: Finalne ustawienia dla {host} - LLDP Cmd: '{lldp_cmd}', LLDP Expect: '{lldp_exp_str}', Uruchom CDP: {run_cdp}, CDP Cmd: '{cdp_cmd}', CDP Expect: '{cdp_exp_str}'")
+
+        lldp_params = {"read_timeout": 180}
+        if lldp_exp_str:
+            lldp_params["expect_string"] = lldp_exp_str
+
         try:
             lldp_raw = net_connect.send_command(lldp_cmd, **lldp_params)
             if lldp_raw and isinstance(lldp_raw, str):
@@ -209,57 +287,90 @@ def cli_get_neighbors_enhanced(host: str, username: str, password: str) -> List[
                 if not lldp_raw.strip():
                     logger.info(f"  CLI-LLDP: Puste wyjście LLDP dla {host}.")
                 else:
-                    conns = _parse_lldp_output(lldp_raw, host);
+                    conns = _parse_lldp_output(lldp_raw, host)
                     all_cli_connections.extend(conns)
-                    if not conns: logger.info(f"  CLI-LLDP: Otrzymano wyjście, ale nie sparsowano połączeń.")
+                    if not conns:  # Poprawiona logika warunku
+                        logger.info(f"  CLI-LLDP: Otrzymano wyjście LLDP, ale nie sparsowano połączeń.")
             elif not lldp_raw:
                 logger.info(f"  CLI-LLDP: Brak danych LLDP (None) dla {host}.")
             else:
                 logger.warning(f"  CLI-LLDP: Nieoczekiwany typ danych LLDP ({type(lldp_raw)}) dla {host}.")
-        except Exception as e:
-            logger.warning(f"  CLI-LLDP: Błąd komendy LLDP dla {host}: {e}", exc_info=False); logger.debug(
-                "Traceback LLDP:", exc_info=True)
+        except Exception as e_lldp:
+            logger.warning(f"  CLI-LLDP: Błąd komendy LLDP ('{lldp_cmd}') dla {host}: {e_lldp}", exc_info=False)
+            logger.debug(f"  CLI-LLDP: Pełny traceback błędu LLDP dla {host}:", exc_info=True)
+
+            # Fallback dla NX-OS, jeśli 'show lldp neighbors detail' zawiodło z "Invalid command"
+            if ("nx-os" in system_info_str or "cisco_nxos" in effective_device_type.lower()) and \
+                    lldp_cmd == "show lldp neighbors detail" and \
+                    ("invalid command" in str(e_lldp).lower() or "incomplete command" in str(e_lldp).lower()):
+                logger.info(f"  CLI: Ponowna próba LLDP dla NX-OS {host} z komendą 'show lldp neighbors'")
+                lldp_cmd_nxos_fallback = "show lldp neighbors"
+                lldp_params_nxos_fallback = {"read_timeout": 180}
+                # Użyj wcześniej ustalonego lldp_exp_str (który dla NX-OS mógł być None lub base_prompt)
+                if lldp_exp_str:
+                    lldp_params_nxos_fallback["expect_string"] = lldp_exp_str
+
+                try:
+                    lldp_raw_fallback = net_connect.send_command(lldp_cmd_nxos_fallback, **lldp_params_nxos_fallback)
+                    if lldp_raw_fallback and isinstance(lldp_raw_fallback, str):
+                        if not lldp_raw_fallback.strip():
+                            logger.info(f"  CLI-LLDP (fallback NXOS): Puste wyjście dla {host}.")
+                        else:
+                            conns_fb = _parse_lldp_output(lldp_raw_fallback, host)
+                            all_cli_connections.extend(conns_fb)
+                            if not conns_fb:
+                                logger.info(
+                                    f"  CLI-LLDP (fallback NXOS): Otrzymano wyjście, ale nie sparsowano połączeń.")
+                    elif not lldp_raw_fallback:
+                        logger.info(f"  CLI-LLDP (fallback NXOS): Brak danych (None) dla {host}.")
+                except Exception as e_nxos_fallback:
+                    logger.warning(
+                        f"  CLI-LLDP (fallback NXOS): Błąd komendy '{lldp_cmd_nxos_fallback}' dla {host}: {e_nxos_fallback}",
+                        exc_info=False)
 
         if not all_cli_connections and run_cdp:
-            cdp_params = {"read_timeout": 180};
+            cdp_params = {"read_timeout": 180}
             if cdp_exp_str:
                 cdp_params["expect_string"] = cdp_exp_str
-            elif is_extreme_like:
-                cdp_params[
-                    "expect_string"] = RE_SLOT_SYS_PROMPT.pattern  # Powinno być run_cdp=False, ale dla bezpieczeństwa
 
             logger.info(f"  CLI: CDP dla {host}: cmd='{cdp_cmd}', params={cdp_params}")
             try:
                 cdp_raw = net_connect.send_command(cdp_cmd, **cdp_params)
                 if cdp_raw and isinstance(cdp_raw, str):
                     logger.debug(f"  CLI-CDP: Otrzymano surowe wyjście CDP dla {host} (długość: {len(cdp_raw)}).")
-                    if not cdp_raw.strip():
+                    if "cdp not enabled" in cdp_raw.lower():
+                        logger.info(f"  CLI-CDP: CDP nie jest włączone na {host}.")
+                    elif not cdp_raw.strip():
                         logger.info(f"  CLI-CDP: Puste wyjście CDP dla {host}.")
                     else:
-                        conns = _parse_cdp_output(cdp_raw, host);
+                        conns = _parse_cdp_output(cdp_raw, host)
                         all_cli_connections.extend(conns)
-                        if not conns: logger.info(f"  CLI-CDP: Otrzymano wyjście, ale nie sparsowano połączeń.")
+                        if not conns:
+                            logger.info(f"  CLI-CDP: Otrzymano wyjście CDP, ale nie sparsowano połączeń.")
                 elif not cdp_raw:
                     logger.info(f"  CLI-CDP: Brak danych CDP (None) dla {host}.")
                 else:
                     logger.warning(f"  CLI-CDP: Nieoczekiwany typ danych CDP ({type(cdp_raw)}) dla {host}.")
-            except Exception as e:
-                logger.warning(f"  CLI-CDP: Błąd komendy CDP dla {host}: {e}", exc_info=False); logger.debug(
-                    "Traceback CDP:", exc_info=True)
+            except Exception as e_cdp:
+                logger.warning(f"  CLI-CDP: Błąd komendy CDP dla {host}: {e_cdp}", exc_info=False)
+                logger.debug(f"  CLI-CDP: Pełny traceback błędu CDP dla {host}:", exc_info=True)
         elif not run_cdp:
-            logger.info(f"  CLI: Pominięto CDP dla {host}.")
-    except NetmikoAuthenticationException as e:
-        logger.error(f"⚠ CLI Auth Error: {host}: {e}")
-    except NetmikoTimeoutException as e:
-        logger.error(f"⚠ CLI Timeout Error: {host}: {e}")
-    except Exception as e:
-        logger.error(f"⚠ CLI General Error: {host}: {e}", exc_info=True)
+            logger.info(f"  CLI: Pominięto CDP dla {host} (np. dla Extreme).")
+
+    except NetmikoAuthenticationException as e_auth_main:
+        logger.error(f"⚠ CLI Auth Error: {host}: {e_auth_main}")
+    except NetmikoTimeoutException as e_timeout_main:
+        logger.error(f"⚠ CLI Timeout Error: {host}: {e_timeout_main}")
+    except Exception as e_general_main:
+        logger.error(f"⚠ CLI General Error: {host}: {e_general_main}", exc_info=True)
     finally:
         if net_connect and net_connect.is_alive():
             try:
-                net_connect.disconnect(); logger.info(f"  CLI: Rozłączono z {host}")
-            except Exception as e:
-                logger.error(f"  CLI Disconnect Error: {host}: {e}", exc_info=True)
+                net_connect.disconnect()
+                logger.info(f"  CLI: Rozłączono z {host}")
+            except Exception as e_disc_final:
+                logger.error(f"  CLI Disconnect Error: {host}: {e_disc_final}", exc_info=True)
+
     if not all_cli_connections:
         logger.info(f"⟶ CLI: Brak sąsiadów CLI dla {host}.")
     else:
