@@ -8,9 +8,9 @@ from librenms_client import LibreNMSAPI
 from utils import get_canonical_identifier
 
 # Stałe związane z ograniczeniem wyświetlania portów
-MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY = 96
-DEFAULT_PORTS_PER_ROW_NORMAL = 26
-DEFAULT_PORTS_PER_ROW_LARGE_DEVICE = 48
+MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY = 110
+DEFAULT_PORTS_PER_ROW_NORMAL = 28
+DEFAULT_PORTS_PER_ROW_LARGE_DEVICE = 55
 
 
 class PortEndpointData(NamedTuple):
