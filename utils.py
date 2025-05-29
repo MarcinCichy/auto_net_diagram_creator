@@ -15,26 +15,31 @@ except ImportError:
 
 
 # Konfiguracja logowania
-def setup_logging(level: int = logging.INFO, log_to_file: bool = True,
-                  log_file: str = "auto_diagram_app.log") -> None:  # Zmieniono domyślny poziom na INFO
+def setup_logging(level_str: str = "INFO", log_to_file: bool = True,
+                  log_file: str = "auto_diagram_app.log") -> None:
     """
     Konfiguruje logowanie do konsoli (z kolorami, jeśli colorlog jest dostępny)
     i opcjonalnie do pliku.
+    Akceptuje poziom logowania jako string.
     """
+    numeric_level = getattr(logging, level_str.upper(), logging.INFO)
+    if not isinstance(numeric_level, int):
+        logging.getLogger(__name__).warning(
+            f"Nieprawidłowy poziom logowania: {level_str}. Używam INFO."
+        )
+        numeric_level = logging.INFO
+
     log_format_str = "%(asctime)s - %(levelname)-8s - [%(name)s:%(lineno)d] - %(message)s"
     log_datefmt_str = "%Y-%m-%d %H:%M:%S"
 
-    # Pobierz główny logger (root logger)
     root_logger = logging.getLogger()
-    root_logger.setLevel(level)
+    root_logger.setLevel(numeric_level)
 
-    # Usuń ewentualne istniejące handlery, aby uniknąć wielokrotnego dodawania
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    # === Handler dla konsoli ===
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)  # Ustaw poziom dla tego konkretnego handlera
+    console_handler = logging.StreamHandler(sys.stdout) # Użyj sys.stdout
+    console_handler.setLevel(numeric_level)
 
     if COLORLOG_AVAILABLE:
         console_formatter = ColoredFormatter(
@@ -53,54 +58,44 @@ def setup_logging(level: int = logging.INFO, log_to_file: bool = True,
         )
     else:
         console_formatter = logging.Formatter(log_format_str, datefmt=log_datefmt_str)
-        # Ostrzeżenie o braku colorlog zostanie zalogowane później, po dodaniu handlerów
 
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
 
-    # === Opcjonalny handler dla pliku ===
     file_logging_configured_successfully = False
     if log_to_file:
         try:
-            file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')  # Tryb 'a' (append)
-            file_handler.setLevel(level)
+            file_handler = logging.FileHandler(log_file, mode='a', encoding='utf-8')
+            file_handler.setLevel(numeric_level)
             file_formatter = logging.Formatter(log_format_str, datefmt=log_datefmt_str)
             file_handler.setFormatter(file_formatter)
             root_logger.addHandler(file_handler)
             file_logging_configured_successfully = True
-            # Logowanie informacji o konfiguracji pliku logów (teraz, gdy handlery są już ustawione)
-            logging.getLogger(__name__).info(f"Logowanie do pliku '{log_file}' zostało włączone i skonfigurowane.")
+            logging.getLogger(__name__).info(f"Logowanie do pliku '{log_file}' zostało włączone i skonfigurowane (poziom: {level_str}).")
         except Exception as e:
-            # Jeśli konfiguracja pliku zawiedzie, zaloguj do konsoli (która powinna już działać)
-            logging.getLogger(__name__).critical(f"Nie udało się skonfigurować logowania do pliku '{log_file}': {e}",
-                                                 exc_info=True)
-            # I wydrukuj na stderr jako ostateczność
+            logging.getLogger(__name__).critical(f"Nie udało się skonfigurować logowania do pliku '{log_file}': {e}", exc_info=True)
             print(f"KRYTYCZNY BŁĄD: Nie udało się skonfigurować logowania do pliku '{log_file}': {e}", file=sys.stderr)
 
-    # Wycisz zbyt gadatliwe loggery z zewnętrznych bibliotek
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    # Dla pysnmp INFO może być przydatne do śledzenia problemów, ale można zmienić na WARNING
-    logging.getLogger("pysnmp").setLevel(logging.INFO)  # Można dać WARNING jeśli za dużo logów
-    logging.getLogger("netmiko").setLevel(logging.INFO)  # Podobnie
+    logging.getLogger("pysnmp").setLevel(logging.INFO)
+    logging.getLogger("netmiko").setLevel(logging.INFO)
     if COLORLOG_AVAILABLE:
         logging.getLogger("colorlog").setLevel(logging.WARNING)
 
-    # Logowanie końcowe o stanie konfiguracji
     if not COLORLOG_AVAILABLE:
-        if file_logging_configured_successfully:
-            logging.getLogger(__name__).warning(
-                f"Moduł 'colorlog' nie jest zainstalowany. Logi konsolowe nie będą kolorowe, ale logowanie do pliku '{log_file}' jest aktywne.")
-        else:
-            logging.getLogger(__name__).warning(
-                "Moduł 'colorlog' nie jest zainstalowany. Logi konsolowe nie będą kolorowe. Logowanie do pliku również nie zostało skonfigurowane lub zawiodło.")
-    elif not file_logging_configured_successfully and log_to_file:  # Chcieliśmy logować do pliku, ale się nie udało
-        logging.getLogger(__name__).warning(
-            f"Logowanie do pliku '{log_file}' nie powiodło się. Logi będą dostępne tylko w konsoli.")
+        msg = "Moduł 'colorlog' nie jest zainstalowany. Logi konsolowe nie będą kolorowe."
+        if log_to_file and file_logging_configured_successfully:
+            logging.getLogger(__name__).warning(f"{msg} Logowanie do pliku '{log_file}' jest aktywne.")
+        elif log_to_file: # Chcieliśmy, ale się nie udało
+            logging.getLogger(__name__).warning(f"{msg} Logowanie do pliku '{log_file}' również nie powiodło się.")
+        else: # Nie chcieliśmy logować do pliku
+             logging.getLogger(__name__).warning(msg)
+    elif log_to_file and not file_logging_configured_successfully:
+        logging.getLogger(__name__).warning(f"Logowanie do pliku '{log_file}' nie powiodło się. Logi będą dostępne tylko w konsoli.")
+    else:
+        logging.getLogger(__name__).info(f"Logowanie skonfigurowane (Poziom: {level_str}, Kolory: {'Tak' if COLORLOG_AVAILABLE else 'Nie'}, Plik: {'Tak' if log_to_file and file_logging_configured_successfully else 'Nie'}).")
 
 
-# Inicjalizacja loggera dla tego modułu (utils.py)
-# Ten logger odziedziczy konfigurację z root_loggera ustawioną przez setup_logging().
-# Komunikaty z tego loggera pojawią się dopiero po wywołaniu setup_logging().
 logger = logging.getLogger(__name__)
 
 
@@ -112,20 +107,18 @@ def find_device_in_list(identifier: Any, all_devices_list: List[Dict[str, Any]])
     if not identifier or not all_devices_list:
         return None
 
-    identifier_str = str(identifier).strip()  # Upewnij się, że to string i bez białych znaków
+    identifier_str = str(identifier).strip()
     identifier_lower = identifier_str.lower()
 
-    if not identifier_str:  # Jeśli po strip() jest pusty
+    if not identifier_str:
         return None
 
-    # 1. Sprawdzenie po IP (dokładne dopasowanie)
     for d in all_devices_list:
         if str(d.get("ip", "")).strip() == identifier_str:
             logger.debug(
                 f"Znaleziono urządzenie wg IP '{identifier_str}': {d.get('hostname') or d.get('sysName') or d.get('device_id')}")
             return d
 
-    # 2. Sprawdzenie po hostname (case-insensitive)
     for d in all_devices_list:
         hostname_api = str(d.get("hostname", "")).strip()
         if hostname_api and hostname_api.lower() == identifier_lower:
@@ -133,7 +126,6 @@ def find_device_in_list(identifier: Any, all_devices_list: List[Dict[str, Any]])
                 f"Znaleziono urządzenie wg hostname '{identifier_str}': {hostname_api} (ID: {d.get('device_id')})")
             return d
 
-    # 3. Sprawdzenie po sysName (case-insensitive)
     for d in all_devices_list:
         sysname_api = str(d.get("sysName", "")).strip()
         if sysname_api and sysname_api.lower() == identifier_lower:
@@ -141,7 +133,6 @@ def find_device_in_list(identifier: Any, all_devices_list: List[Dict[str, Any]])
                 f"Znaleziono urządzenie wg sysName '{identifier_str}': {d.get('hostname') or d.get('ip')} (ID: {d.get('device_id')})")
             return d
 
-    # 4. Sprawdzenie po purpose (case-insensitive)
     for d in all_devices_list:
         purpose_api = str(d.get("purpose", "")).strip()
         if purpose_api and purpose_api.lower() == identifier_lower:
@@ -149,7 +140,6 @@ def find_device_in_list(identifier: Any, all_devices_list: List[Dict[str, Any]])
                 f"Znaleziono urządzenie wg purpose '{identifier_str}': {d.get('hostname') or d.get('ip')} (ID: {d.get('device_id')})")
             return d
 
-    # 5. Jeśli identyfikator jest numeryczny, spróbuj dopasować do device_id
     if identifier_str.isdigit():
         dev_id_to_find = int(identifier_str)
         for d in all_devices_list:
@@ -187,8 +177,8 @@ Optional[str]:
     if ip_addr:
         return ip_addr
 
-    if hostname and hostname_looks_like_ip:  # hostname został już sprawdzony, więc jeśli tu jesteśmy, to jest to IP
-        return hostname  # Zwróć hostname, które wygląda jak IP, jeśli nie ma właściwego pola IP
+    if hostname and hostname_looks_like_ip:
+        return hostname
 
     original_id_str = str(original_identifier).strip() if original_identifier else ""
     if original_id_str:
@@ -198,10 +188,9 @@ Optional[str]:
     if dev_id is not None:
         return f"device_id_{str(dev_id).strip()}"
 
-    # Jako ostateczność, jeśli nic innego nie jest dostępne
     sys_name_fallback = str(device_info_from_api.get('sysName', "")).strip()
     if sys_name_fallback:
         return sys_name_fallback
 
     logger.warning(f"Nie można było ustalić kanonicznego identyfikatora dla urządzenia: {device_info_from_api}")
-    return None  # Jeśli absolutnie nic nie można ustalić
+    return None
