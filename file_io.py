@@ -4,21 +4,18 @@ import json
 import xml.etree.ElementTree as ET
 import pprint
 import logging
-from typing import List, Dict, Any, Optional # <<< DODANO TEN IMPORT
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_IP_LIST_FILE = "ip_list.txt"
-DEFAULT_CONNECTIONS_TXT_FILE = "connections.txt"
-DEFAULT_CONNECTIONS_JSON_FILE = "connections.json"
-DEFAULT_DIAGRAM_FILE = "network_diagram.drawio"
+# Usunięto globalne stałe DEFAULT_..._FILE
 
-def load_ip_list(filepath: str = DEFAULT_IP_LIST_FILE) -> List[str]: # Teraz 'List' jest zdefiniowane
+def load_ip_list(filepath: str) -> List[str]: # Usunięto wartość domyślną
     """Wczytuje listę IP/hostname z pliku, ignorując puste linie i komentarze."""
     if not os.path.exists(filepath):
         logger.warning(f"Plik listy IP '{filepath}' nie istnieje.")
         return []
-    lines_read: List[str] = [] # Użycie 'List' wewnątrz funkcji
+    lines_read: List[str] = []
     try:
         with open(filepath, 'r', encoding="utf-8") as f:
             lines_read = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
@@ -31,11 +28,21 @@ def load_ip_list(filepath: str = DEFAULT_IP_LIST_FILE) -> List[str]: # Teraz 'Li
         return []
     return lines_read
 
-def save_connections_txt(connections: List[Dict[str, Any]], filepath: str = DEFAULT_CONNECTIONS_TXT_FILE) -> bool:
+def save_connections_txt(connections: List[Dict[str, Any]], filepath: str) -> bool: # Usunięto wartość domyślną
     """Zapisuje znalezione połączenia do pliku tekstowego."""
     if not connections:
         logger.info(f"Brak połączeń do zapisania w pliku tekstowym '{filepath}'.")
-        return True
+        # Zapisz pusty plik z nagłówkiem, aby uniknąć błędów, jeśli użytkownik oczekuje pliku
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write("# Wygenerowana mapa połączeń sieciowych\n")
+                f.write("# Format: UrządzenieLokalne:PortLokalny -> UrządzenieZdalne:PortZdalny (VLAN X) via Metoda\n\n")
+                f.write("# Brak połączeń do zapisania.\n")
+            return True
+        except Exception as e:
+            logger.error(f"Błąd zapisu pustego pliku tekstowego połączeń '{filepath}': {e}", exc_info=True)
+            return False
+
     try:
         sorted_conns = sorted(connections, key=lambda x: (str(x.get('local_device','')), str(x.get('local_port',''))))
         with open(filepath, "w", encoding="utf-8") as f:
@@ -52,30 +59,26 @@ def save_connections_txt(connections: List[Dict[str, Any]], filepath: str = DEFA
         logger.error(f"Błąd zapisu połączeń do pliku tekstowego '{filepath}': {e}", exc_info=True)
         return False
 
-def save_connections_json(connections: List[Dict[str, Any]], filepath: str = DEFAULT_CONNECTIONS_JSON_FILE) -> bool:
+def save_connections_json(connections: List[Dict[str, Any]], filepath: str) -> bool: # Usunięto wartość domyślną
     """Zapisuje znalezione połączenia do pliku JSON."""
-    if not connections:
-        logger.info(f"Brak połączeń do zapisania w pliku JSON '{filepath}'.")
-        try:
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump([], f, indent=4, ensure_ascii=False)
-            return True
-        except Exception as e:
-            logger.error(f"Błąd zapisu pustego pliku JSON '{filepath}': {e}", exc_info=True)
-            return False
+    # Jeśli nie ma połączeń, zapisz pustą listę JSON
+    data_to_save = []
+    if connections:
+        data_to_save = sorted(connections, key=lambda x: (str(x.get('local_device','')), str(x.get('local_port',''))))
+        logger.debug(f"Przygotowywanie do zapisu {len(data_to_save)} połączeń do pliku JSON '{filepath}'.")
+    else:
+        logger.info(f"Brak połączeń do zapisania w pliku JSON '{filepath}'. Zapisuję pustą listę.")
 
     try:
-        sorted_conns = sorted(connections, key=lambda x: (str(x.get('local_device','')), str(x.get('local_port',''))))
-        logger.debug(f"Przygotowywanie do zapisu {len(sorted_conns)} połączeń do pliku JSON '{filepath}'. Pierwsze połączenie (jeśli istnieje): {pprint.pformat(sorted_conns[0]) if sorted_conns else 'Brak'}")
         with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(sorted_conns, f, indent=4, ensure_ascii=False)
-        logger.info(f"✓ Połączenia JSON ({len(sorted_conns)} wpisów) zapisane w '{filepath}'")
+            json.dump(data_to_save, f, indent=4, ensure_ascii=False)
+        logger.info(f"✓ Połączenia JSON ({len(data_to_save)} wpisów) zapisane w '{filepath}'")
         return True
     except Exception as e:
         logger.error(f"Błąd zapisu połączeń do pliku JSON '{filepath}': {e}", exc_info=True)
         return False
 
-def load_connections_json(filepath: str = DEFAULT_CONNECTIONS_JSON_FILE) -> List[Dict[str, Any]]:
+def load_connections_json(filepath: str) -> List[Dict[str, Any]]: # Usunięto wartość domyślną
     """Wczytuje dane o połączeniach z pliku JSON."""
     if not os.path.exists(filepath):
         logger.warning(f"Plik połączeń JSON '{filepath}' nie istnieje. Zwracam pustą listę.")
@@ -96,12 +99,13 @@ def load_connections_json(filepath: str = DEFAULT_CONNECTIONS_JSON_FILE) -> List
         logger.error(f"Błąd odczytu pliku JSON z połączeniami '{filepath}': {e}", exc_info=True)
         return []
 
-def save_diagram_xml(xml_tree: ET.ElementTree, filepath: str = DEFAULT_DIAGRAM_FILE) -> bool:
+def save_diagram_xml(xml_tree: ET.ElementTree, filepath: str) -> bool: # Usunięto wartość domyślną
     """Zapisuje drzewo XML diagramu Draw.io do pliku."""
     if xml_tree is None or xml_tree.getroot() is None:
         logger.warning(f"Próba zapisu pustego lub nieprawidłowego drzewa XML diagramu do '{filepath}'. Pomijam.")
         return False
     try:
+        # ET.indent jest dostępne od Python 3.9
         if hasattr(ET, 'indent'):
             ET.indent(xml_tree.getroot(), space="  ", level=0)
         xml_bytes = ET.tostring(xml_tree.getroot(), encoding="utf-8", method="xml")

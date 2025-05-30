@@ -2,15 +2,21 @@
 import logging
 import re
 import math
-from typing import List, Dict, Tuple, Optional, Any, NamedTuple
+from typing import List, Dict, Tuple, Optional, Any, NamedTuple, Pattern, Set
 
 from librenms_client import LibreNMSAPI
-from utils import get_canonical_identifier
+from utils import get_canonical_identifier # Zakładamy, że utils jest w zasięgu
 
-# Stałe związane z ograniczeniem wyświetlania portów
-MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY = 110
-DEFAULT_PORTS_PER_ROW_NORMAL = 28
-DEFAULT_PORTS_PER_ROW_LARGE_DEVICE = 55
+logger = logging.getLogger(__name__)
+
+try:
+    import natsort
+    natsort_keygen = natsort.natsort_keygen()
+    logger.debug("Moduł 'natsort' zaimportowany pomyślnie dla common_device_logic.")
+except ImportError:
+    logger.warning("Moduł 'natsort' nie znaleziony. Sortowanie nazw portów będzie standardowe.")
+    def natsort_keygen(): # type: ignore
+        return lambda x: str(x)
 
 
 class PortEndpointData(NamedTuple):
@@ -24,40 +30,7 @@ class DynamicLayoutInfo(NamedTuple):
     width: float
     height: float
     num_rows: int
-    ports_per_row: int  # To powinno być skonfigurowane ports_per_row użyte do obliczeń
-
-
-DEFAULT_PORTS_PER_ROW = DEFAULT_PORTS_PER_ROW_NORMAL
-PORT_WIDTH = 20.0;
-PORT_HEIGHT = 20.0;
-HORIZONTAL_SPACING = 10.0;
-VERTICAL_SPACING = 15.0
-ROW_OFFSET_Y = 7.0;
-CHASSIS_PADDING_X = 15.0;
-CHASSIS_PADDING_Y = 7.0
-MIN_CHASSIS_WIDTH = 100.0;
-MIN_CHASSIS_HEIGHT = 60.0;
-DEFAULT_CHASSIS_HEIGHT_NO_PORTS = 40.0
-WAYPOINT_OFFSET = 20.0;
-LOGICAL_IF_LIST_MAX_HEIGHT = 150.0;
-PHYSICAL_PORT_LIST_MAX_HEIGHT = 200.0
-LABEL_LINE_HEIGHT = 10.0;
-LABEL_PADDING = 4.0
-STACK_DETECTION_THRESHOLD = DEFAULT_PORTS_PER_ROW_LARGE_DEVICE * 2 + 4
-
-logger = logging.getLogger(__name__)
-
-try:
-    import natsort
-
-    natsort_keygen = natsort.natsort_keygen()
-    logger.debug("Moduł 'natsort' zaimportowany pomyślnie dla common_device_logic.")
-except ImportError:
-    logger.warning("Moduł 'natsort' nie znaleziony. Sortowanie nazw portów będzie standardowe.")
-
-
-    def natsort_keygen():
-        return lambda x: str(x)
+    ports_per_row: int
 
 
 class DeviceDisplayData(NamedTuple):
@@ -73,56 +46,93 @@ class DeviceDisplayData(NamedTuple):
     ports_display_limited: bool
 
 
-def classify_ports(ports_data_from_api: List[Dict[str, Any]], device_hostname_for_log: str = "Nieznane urządzenie") -> \
-        Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def _compile_regex_from_config(config: Dict[str, Any], key: str, default_pattern: str = ".*", flags: int = 0) -> Pattern[str]:
+    pattern_str = config.get(key) # config_loader zapewni wartość domyślną, jeśli klucza nie ma w .ini
+    try:
+        if pattern_str and pattern_str.strip():
+            return re.compile(pattern_str, flags)
+    except re.error as e:
+        logger.error(f"Błąd kompilacji regex z config dla klucza '{key}' (wzorzec: '{pattern_str}'): {e}. Używam domyślnego '{default_pattern}'.")
+    # Jeśli pattern_str jest None (bo klucza nie było i default z config_loader to None) lub pusty, lub błąd kompilacji
+    return re.compile(default_pattern, flags)
+
+
+def classify_ports(
+        ports_data_from_api: List[Dict[str, Any]],
+        device_hostname_for_log: str = "Nieznane urządzenie",
+        config: Optional[Dict[str, Any]] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+
+    if config is None: config = {}
+
     physical_ports: List[Dict[str, Any]] = []
     logical_interfaces: List[Dict[str, Any]] = []
     mgmt0_port_info: Optional[Dict[str, Any]] = None
-    physical_name_patterns = re.compile(
-        r'^(Eth|Gi|Te|Fa|Hu|Twe|Fo|mgmt|Management|Serial|Port\s?\d|SFP|XFP|QSFP|em\d|ens\d|eno\d|enp\d+s\d+|ge-|xe-|et-|bri|lan\d|po\d+)',
-        re.IGNORECASE)
-    stack_port_pattern = re.compile(r'^[a-zA-Z]+[-]?\d+/\d+(/\d+)+$', re.IGNORECASE)
-    logical_name_patterns = re.compile(
-        r'^(Vlan|vl|Loopback|Lo|lo\d*|Port-channel|Po|Bundle-Ether|ae|Tunnel|Tun|Null|Nu|Cpu|Fabric|Voice|Async|Group-Async|ipsec|gre|sit|pimreg|mgmt[1-9]|Irq|Service-Engine|Dialer|Virtual-Access|Virtual-Template|Subinterface|BVI|BV|Cellular)|.*\.\d+$',
-        re.IGNORECASE)
-    physical_types_iana = {'ethernetcsmacd', 'fastether', 'gigabitethernet', 'fastetherfx', 'infinitiband', 'sonet',
-                           'sdsl', 'hdsl', 'shdsl', 'adsl', 'radsl', 'vdsl', 'ieee80211', 'opticalchannel',
-                           'fibrechannel', 'propvirtual', 'proppointtopointserial', 'ppp', 'eon', 'tokenring', 'atm',
-                           'frameRelay', 'hssi', 'hippi', 'isdn', 'x25', 'aal5', 'voiceem', 'voicefxo', 'voicefxs',
-                           'digitalpowerline', 'modem', 'serial', 'docsCableMaclayer', 'docsCableDownstream',
-                           'docsCableUpstream', 'ieee8023adLag'}
-    logical_types_iana = {'l3ipvlan', 'softwareLoopback', 'tunnel', 'propMultiplexor', 'bridge', 'other', 'l2vlan',
-                          'voiceoverip', 'atmSubInterface', 'virtualipaddress', 'mp OvaLink', 'iana vielf'}
+
+    # Pobieranie regexów i zbiorów z konfiguracji
+    # _compile_regex_from_config użyje swojego default_pattern jeśli klucz z config da None lub pusty string
+    physical_name_patterns = _compile_regex_from_config(config, 'physical_name_patterns_re', flags=re.IGNORECASE)
+    stack_port_pattern = _compile_regex_from_config(config, 'stack_port_pattern_re', flags=re.IGNORECASE)
+    logical_name_patterns = _compile_regex_from_config(config, 'logical_name_patterns_re', flags=re.IGNORECASE)
+
+    # config.get() tutaj polega na tym, że config_loader dostarczył wartości domyślne (puste zbiory, jeśli nie ma w .ini)
+    physical_types_iana: Set[str] = config.get('physical_types_iana_set')
+    logical_types_iana: Set[str] = config.get('logical_types_iana_set')
+
+    logger.debug(f"ClassifyPorts ({device_hostname_for_log}): Używane regexy: Phys='{physical_name_patterns.pattern}', Stack='{stack_port_pattern.pattern}', Logical='{logical_name_patterns.pattern}'")
+    logger.debug(f"ClassifyPorts ({device_hostname_for_log}): Używane zbiory IANA: Phys (len:{len(physical_types_iana)}), Logical (len:{len(logical_types_iana)})")
+
+
     temp_mgmt0_candidates = []
     other_ports_to_classify = []
+
     for port in ports_data_from_api:
         if_name_lower = str(port.get('ifName', '')).lower()
         if_descr_lower = str(port.get('ifDescr', '')).lower()
-        if 'mgmt0' == if_name_lower or 'management0' == if_name_lower or 'mgmt0' == if_descr_lower or 'management0' == if_descr_lower or (
-                if_name_lower.startswith("mgmt") and if_name_lower.endswith("0")) or (
-                if_descr_lower.startswith("mgmt") and if_descr_lower.endswith("0")):
+
+        if 'mgmt0' == if_name_lower or 'management0' == if_name_lower or \
+           'mgmt0' == if_descr_lower or 'management0' == if_descr_lower or \
+           (if_name_lower.startswith("mgmt") and if_name_lower.endswith("0")) or \
+           (if_descr_lower.startswith("mgmt") and if_descr_lower.endswith("0")):
             temp_mgmt0_candidates.append(port)
         else:
             other_ports_to_classify.append(port)
+
     if temp_mgmt0_candidates:
         mgmt0_with_mac = [p for p in temp_mgmt0_candidates if p.get('ifPhysAddress')];
-        mgmt0_port_info = mgmt0_with_mac[0] if mgmt0_with_mac else temp_mgmt0_candidates[0]
+        if mgmt0_with_mac:
+            mgmt0_port_info = mgmt0_with_mac[0]
+        else:
+            mgmt0_port_info = temp_mgmt0_candidates[0]
+
         logger.debug(
             f"Port mgmt0 zidentyfikowany dla {device_hostname_for_log}: {mgmt0_port_info.get('ifName')} (ID: {mgmt0_port_info.get('port_id')})")
-        if mgmt0_port_info not in physical_ports: physical_ports.append(mgmt0_port_info)  # Dodaj do listy fizycznych
+        if mgmt0_port_info not in physical_ports:
+             physical_ports.append(mgmt0_port_info)
+
+
     for port_info in other_ports_to_classify:
-        if_name, if_descr, if_type_raw, if_phys_address, if_oper_status = str(port_info.get('ifName', '')), str(
-            port_info.get('ifDescr', '')), port_info.get('ifType'), str(port_info.get('ifPhysAddress', '')), str(
-            port_info.get('ifOperStatus', '')).lower()
-        if port_info != mgmt0_port_info and (if_oper_status == "notpresent" or (
-                if_oper_status == "lowerlayerdown" and not if_phys_address)): logger.debug(
-            f"Pomijanie portu '{if_name}' ({if_descr}) na {device_hostname_for_log} (status: '{if_oper_status}', brak MAC)."); continue
-        has_mac = bool(
-            if_phys_address and len(if_phys_address.replace(':', '').replace('-', '').replace('.', '')) >= 12)
-        if_type_iana = (
-            str(if_type_raw['iana']).lower() if isinstance(if_type_raw, dict) and 'iana' in if_type_raw else str(
-                if_type_raw).lower() if isinstance(if_type_raw, str) else '')
+        if_name, if_descr = str(port_info.get('ifName', '')), str(port_info.get('ifDescr', ''))
+        if_type_raw = port_info.get('ifType')
+        if_phys_address = str(port_info.get('ifPhysAddress', ''))
+        if_oper_status = str(port_info.get('ifOperStatus', '')).lower()
+
+        if port_info != mgmt0_port_info and \
+           (if_oper_status == "notpresent" or (if_oper_status == "lowerlayerdown" and not if_phys_address)):
+            logger.debug(
+                f"Pomijanie portu '{if_name}' ({if_descr}) na {device_hostname_for_log} (status: '{if_oper_status}', brak MAC).")
+            continue
+
+        has_mac = bool(if_phys_address and len(if_phys_address.replace(':', '').replace('-', '').replace('.', '')) >= 12)
+
+        if_type_iana = ''
+        if isinstance(if_type_raw, dict) and 'iana' in if_type_raw:
+            if_type_iana = str(if_type_raw['iana']).lower()
+        elif isinstance(if_type_raw, str):
+            if_type_iana = if_type_raw.lower()
+
         is_physical = False
+
         if if_type_iana in physical_types_iana:
             is_physical = True
         elif if_type_iana in logical_types_iana:
@@ -137,108 +147,153 @@ def classify_ports(ports_data_from_api: List[Dict[str, Any]], device_hostname_fo
             is_physical = True
         else:
             is_physical = False
-        if if_type_iana == 'ieee8023adlag' or any(
-            k in if_name.lower() for k in ['port-ch', 'bundle-eth', 'lag', 'bond']) or any(
-            k in if_descr.lower() for k in ['port-ch', 'bundle-eth', 'lag', 'bond']): is_physical = has_mac
-        if port_info == mgmt0_port_info and mgmt0_port_info in physical_ports: continue  # Unikaj duplikatu mgmt0
+
+        if if_type_iana == 'ieee8023adlag' or \
+           any(k in if_name.lower() for k in ['port-ch', 'bundle-eth', 'lag', 'bond', 'ae']) or \
+           any(k in if_descr.lower() for k in ['port-ch', 'bundle-eth', 'lag', 'bond', 'ae']):
+            is_physical = has_mac
+            if not has_mac:
+                 logger.debug(f"Port LAG '{if_name}' ({if_descr}) na {device_hostname_for_log} bez MAC traktowany jako logiczny.")
+
+        if port_info == mgmt0_port_info and mgmt0_port_info in physical_ports:
+            continue
+
         if is_physical:
-            if port_info not in physical_ports: physical_ports.append(port_info)
+            if port_info not in physical_ports:
+                physical_ports.append(port_info)
         else:
             port_info['_ifType_iana_debug'] = if_type_iana
-            if port_info not in logical_interfaces: logical_interfaces.append(port_info)
+            if port_info not in logical_interfaces:
+                logical_interfaces.append(port_info)
+
     logger.info(
-        f"Klasyfikacja portów dla '{device_hostname_for_log}': {len(physical_ports)} fizycznych (w tym mgmt0), {len(logical_interfaces)} logicznych/innych.")
+        f"Klasyfikacja portów dla '{device_hostname_for_log}': {len(physical_ports)} fizycznych (w tym mgmt0, jeśli znaleziono), {len(logical_interfaces)} logicznych/innych.")
     return physical_ports, logical_interfaces, mgmt0_port_info
 
 
-def calculate_device_chassis_layout(num_total_physical_ports_for_layout: int,
-                                    num_ports_actually_displaying: int) -> DynamicLayoutInfo:
-    if num_ports_actually_displaying <= 0:
-        return DynamicLayoutInfo(MIN_CHASSIS_WIDTH, DEFAULT_CHASSIS_HEIGHT_NO_PORTS, 0, 0)
+def calculate_device_chassis_layout(
+        num_total_physical_ports_for_layout: int,
+        num_ports_actually_displaying: int,
+        config: Dict[str, Any]
+    ) -> DynamicLayoutInfo:
 
-    ports_per_row_config = DEFAULT_PORTS_PER_ROW_LARGE_DEVICE if num_ports_actually_displaying > MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY / 1.5 else DEFAULT_PORTS_PER_ROW_NORMAL
+    # Pobieranie wartości z config; config_loader zapewni wartości domyślne
+    min_chassis_width = config.get('min_chassis_width')
+    default_chassis_height_no_ports = config.get('default_chassis_height_no_ports')
+
+    if num_ports_actually_displaying <= 0:
+        return DynamicLayoutInfo(min_chassis_width, default_chassis_height_no_ports, 0, 0)
+
+    max_physical_ports_display_cfg = config.get('max_physical_ports_for_chassis_display')
+    ports_per_row_large_cfg = config.get('default_ports_per_row_large_device')
+    ports_per_row_normal_cfg = config.get('default_ports_per_row_normal')
+
+    port_width_cfg = config.get('port_width')
+    port_height_cfg = config.get('port_height')
+    horizontal_spacing_cfg = config.get('port_horizontal_spacing')
+    vertical_spacing_cfg = config.get('port_vertical_spacing')
+    row_offset_y_cfg = config.get('port_row_offset_y')
+    chassis_padding_x_cfg = config.get('chassis_padding_x')
+    chassis_padding_y_cfg = config.get('chassis_padding_y')
+    min_chassis_height_cfg = config.get('min_chassis_height')
+
+
+    ports_per_row_config = ports_per_row_large_cfg \
+        if num_ports_actually_displaying > max_physical_ports_display_cfg / 1.5 \
+        else ports_per_row_normal_cfg
 
     num_rows = max(1, math.ceil(num_ports_actually_displaying / ports_per_row_config))
 
     actual_ports_in_widest_row = 0
     if num_rows > 0:
         ports_left = num_ports_actually_displaying
-        max_in_row_calc = 0  # Zmieniono nazwę, żeby nie kolidować z pętlą
-        for _ in range(num_rows):  # Pętla po obliczonej liczbie rzędów
+        max_in_row_calc = 0
+        for _ in range(num_rows):
             current_row_count = min(ports_left, ports_per_row_config)
             if current_row_count > max_in_row_calc:
                 max_in_row_calc = current_row_count
             ports_left -= current_row_count
-            if ports_left <= 0:  # Poprawna składnia warunku if
+            if ports_left <= 0:
                 break
-                # Ustalenie szerokości najszerszego rzędu
         if num_rows == 1:
             actual_ports_in_widest_row = num_ports_actually_displaying
-        else:  # Jeśli więcej niż 1 rząd, najszerszy rząd to ports_per_row_config lub mniej (ostatni rząd)
-            # max_in_row_calc powinien dać poprawną wartość
-            actual_ports_in_widest_row = max_in_row_calc if max_in_row_calc > 0 else ports_per_row_config
-
-    else:  # num_rows == 0 (nie powinno się zdarzyć, jeśli num_ports_actually_displaying > 0)
+        else:
+            actual_ports_in_widest_row = min(num_ports_actually_displaying, ports_per_row_config)
+    else:
         actual_ports_in_widest_row = 0
 
-    chassis_content_width = actual_ports_in_widest_row * PORT_WIDTH + \
-                            max(0, actual_ports_in_widest_row - 1) * HORIZONTAL_SPACING
-    chassis_width = max(MIN_CHASSIS_WIDTH, chassis_content_width + 2 * CHASSIS_PADDING_X)
+    chassis_content_width = actual_ports_in_widest_row * port_width_cfg + \
+                            max(0, actual_ports_in_widest_row - 1) * horizontal_spacing_cfg
+    chassis_width = max(min_chassis_width, chassis_content_width + 2 * chassis_padding_x_cfg)
 
-    chassis_content_height = num_rows * PORT_HEIGHT + \
-                             max(0, num_rows - 1) * VERTICAL_SPACING
-    chassis_height = max(MIN_CHASSIS_HEIGHT, chassis_content_height + ROW_OFFSET_Y + CHASSIS_PADDING_Y)
+    chassis_content_height = num_rows * port_height_cfg + \
+                             max(0, num_rows - 1) * vertical_spacing_cfg
+    chassis_height = max(min_chassis_height_cfg, chassis_content_height + row_offset_y_cfg + chassis_padding_y_cfg)
 
     logger.debug(
         f"Layout chassis: {num_ports_actually_displaying} portów (z {num_total_physical_ports_for_layout} kandydatów). "
-        f"Rzędy:{num_rows}, Porty/rząd (konfig):{ports_per_row_config}, Najszerszy rząd (obliczony):{actual_ports_in_widest_row}. "
+        f"Rzędy:{num_rows}, Porty/rząd (konfig):{ports_per_row_config}, Najszerszy rząd (użyty do obliczeń):{actual_ports_in_widest_row}. "
         f"Wymiary chassis: {chassis_width:.0f}x{chassis_height:.0f}")
 
     return DynamicLayoutInfo(chassis_width, chassis_height, num_rows, ports_per_row_config)
 
 
-def prepare_device_display_data(dev_api_info: Dict[str, Any], api: LibreNMSAPI, dev_idx: int) -> DeviceDisplayData:
+def prepare_device_display_data(
+        dev_api_info: Dict[str, Any],
+        api: LibreNMSAPI,
+        dev_idx: int,
+        config: Dict[str, Any]
+    ) -> DeviceDisplayData:
+
     canon_id = get_canonical_identifier(dev_api_info) or f"Urządzenie_idx_{dev_idx}"
     logger.debug(f"Przygotowywanie danych wyświetlania dla: {canon_id} (ID API: {dev_api_info.get('device_id')})")
+
     ports_data = []
     if dev_api_info.get("device_id"):
         try:
-            ports_data = api.get_ports(str(dev_api_info["device_id"]),
-                                       columns="port_id,ifIndex,ifName,ifDescr,ifType,ifPhysAddress,ifOperStatus,ifAdminStatus,ifAlias") or []
+            ports_data = api.get_ports(
+                str(dev_api_info["device_id"]),
+                columns="port_id,ifIndex,ifName,ifDescr,ifType,ifPhysAddress,ifOperStatus,ifAdminStatus,ifAlias"
+            ) or []
         except Exception as e:
-            logger.error(f"Błąd pobierania portów dla {canon_id}: {e}", exc_info=True)
+            logger.error(f"Błąd pobierania portów dla {canon_id} (ID: {dev_api_info.get('device_id')}): {e}", exc_info=True)
 
-    all_phys_classified, logical_ifs_classified, mgmt0_info = classify_ports(ports_data, canon_id)
+    all_phys_classified, logical_ifs_classified, mgmt0_info = classify_ports(ports_data, canon_id, config)
 
-    phys_candidates = []
+    phys_candidates_for_layout = []
     for p in all_phys_classified:
-        if p == mgmt0_info: continue
+        if p == mgmt0_info:
+            continue
         adm_down = str(p.get('ifAdminStatus', 'up')).lower() == 'down'
         oper_down = str(p.get('ifOperStatus', 'unknown')).lower() in ['down', 'lowerlayerdown', 'notpresent']
-        has_alias = bool(p.get('ifAlias', '').strip())
+        has_alias = bool(str(p.get('ifAlias', '')).strip())
+
         if adm_down and oper_down and not has_alias:
-            logger.debug(f"Port '{p.get('ifName')}' na '{canon_id}' pominięty w layoucie (admin&oper down, no_alias).")
+            logger.debug(f"Port '{p.get('ifName')}' ({p.get('ifDescr')}) na '{canon_id}' pominięty w layoucie chassis (admin&oper down, brak aliasu).")
             continue
-        phys_candidates.append(p)
+        phys_candidates_for_layout.append(p)
 
     try:
-        phys_candidates.sort(key=lambda p: natsort_keygen(p.get('ifName', str(p.get('port_id', 'zzzz')))))
+        phys_candidates_for_layout.sort(key=lambda p: natsort_keygen(p.get('ifName', str(p.get('port_id', 'zzzz')))))
     except Exception:
-        logger.warning(f"Błąd natsort dla portów fizycznych '{canon_id}'. Używam standardowego sortowania.")
-        phys_candidates.sort(key=lambda p: str(p.get('ifName', str(p.get('port_id', 'zzzz')))))
+        logger.warning(f"Błąd natsort dla portów fizycznych (layout) '{canon_id}'. Używam standardowego sortowania.")
+        phys_candidates_for_layout.sort(key=lambda p: str(p.get('ifName', str(p.get('port_id', 'zzzz')))))
 
-    total_phys_before_limit = len(phys_candidates)
+
+    total_phys_before_limit = len(phys_candidates_for_layout)
     limited_flag = False
     phys_for_layout: List[Dict[str, Any]]
 
-    if total_phys_before_limit > MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY:
+    max_ports_display_cfg = config.get('max_physical_ports_for_chassis_display')
+
+    if total_phys_before_limit > max_ports_display_cfg:
         logger.info(
-            f"Dla '{canon_id}' liczba portów ({total_phys_before_limit}) przekracza limit ({MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY}). Ograniczam.")
-        phys_for_layout = phys_candidates[:MAX_PHYSICAL_PORTS_FOR_CHASSIS_DISPLAY]
+            f"Dla '{canon_id}' liczba portów fizycznych do layoutu ({total_phys_before_limit}) przekracza limit ({max_ports_display_cfg}). Ograniczam.")
+        phys_for_layout = phys_candidates_for_layout[:max_ports_display_cfg]
         limited_flag = True
-        logger.info(f"Wyświetlonych zostanie {len(phys_for_layout)} portów dla '{canon_id}'.")
+        logger.info(f"Wyświetlonych zostanie {len(phys_for_layout)} portów na chassis dla '{canon_id}'.")
     else:
-        phys_for_layout = phys_candidates
+        phys_for_layout = phys_candidates_for_layout
 
     try:
         all_phys_classified.sort(key=lambda p: natsort_keygen(p.get('ifName', str(p.get('port_id', 'zzzz')))))
@@ -248,8 +303,18 @@ def prepare_device_display_data(dev_api_info: Dict[str, Any], api: LibreNMSAPI, 
         all_phys_classified.sort(key=lambda p: str(p.get('ifName', str(p.get('port_id', 'zzzz')))))
         logical_ifs_classified.sort(key=lambda p: str(p.get('ifName', str(p.get('port_id', 'zzzz')))))
 
-    layout_info = calculate_device_chassis_layout(total_phys_before_limit, len(phys_for_layout))
-    is_stack_dev = len(all_phys_classified) > STACK_DETECTION_THRESHOLD  # Bazuj na wszystkich fizycznych (z mgmt0)
+
+    layout_info = calculate_device_chassis_layout(total_phys_before_limit, len(phys_for_layout), config)
+
+    stack_threshold_factor = config.get('stack_detection_threshold_factor')
+    stack_threshold_offset = config.get('stack_detection_threshold_offset')
+    ports_per_row_large_cfg = config.get('default_ports_per_row_large_device')
+
+    stack_detection_threshold = ports_per_row_large_cfg * stack_threshold_factor + stack_threshold_offset
+    is_stack_dev = len(all_phys_classified) > stack_detection_threshold
+    if is_stack_dev:
+        logger.info(f"Urządzenie '{canon_id}' zidentyfikowane jako STACK (porty: {len(all_phys_classified)}, próg: {stack_detection_threshold}).")
+
 
     return DeviceDisplayData(
         device_api_info=dev_api_info,
