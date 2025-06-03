@@ -3,10 +3,10 @@ import xml.etree.ElementTree as ET
 import re
 import math
 import logging
-from typing import List, Dict, Tuple, Optional, Any, NamedTuple
+from typing import List, Dict, Tuple, Optional, Any
 
 from librenms_client import LibreNMSAPI
-from utils import get_canonical_identifier
+from utils import get_canonical_identifier, normalize_interface_name  # Zmieniony import
 
 import common_device_logic
 from common_device_logic import PortEndpointData, DeviceDisplayData
@@ -59,16 +59,16 @@ class SVGDiagram:
         defs = ET.SubElement(self.svg_root, "defs")
         style_el = ET.SubElement(defs, "style", {"type": "text/css"})
 
-        default_font_family = self.config.get('svg_default_font_family')
-        svg_default_text_color = self.config.get('svg_default_text_color')
-        svg_port_label_font_size = self.config.get('svg_port_label_font_size')
-        svg_alias_font_size = self.config.get('svg_alias_font_size')
-        svg_info_title_font_size = self.config.get('svg_info_title_font_size')
-        svg_info_text_font_size = self.config.get('svg_info_text_font_size')
-        svg_connection_label_font_size = self.config.get('svg_connection_label_font_size')
-        svg_info_hr_color = self.config.get('svg_info_hr_color')
-        svg_info_label_padding_cfg = self.config.get('svg_info_label_padding')
-        label_line_height_cfg = self.config.get('label_line_height')
+        default_font_family = self.config.get('svg_default_font_family', "Arial, Helvetica, sans-serif")
+        svg_default_text_color = self.config.get('svg_default_text_color', "black")
+        svg_port_label_font_size = self.config.get('svg_port_label_font_size', "8px")
+        svg_alias_font_size = self.config.get('svg_alias_font_size', "7.5px")
+        svg_info_title_font_size = self.config.get('svg_info_title_font_size', "8.5px")
+        svg_info_text_font_size = self.config.get('svg_info_text_font_size', "8px")
+        svg_connection_label_font_size = self.config.get('svg_connection_label_font_size', "7.5px")
+        svg_info_hr_color = self.config.get('svg_info_hr_color', "#D0D0D0")
+        svg_info_label_padding_cfg = self.config.get('svg_info_label_padding', "5px")
+        label_line_height_cfg = self.config.get('label_line_height', 10.0)
 
         style_el.text = f"""svg {{ font-family: {default_font_family}; }}
             .port-label {{ font-size: {svg_port_label_font_size}; text-anchor: middle; dominant-baseline: central; fill: {svg_default_text_color}; }}
@@ -100,8 +100,7 @@ class SVGDiagram:
 
     def get_svg_string(self) -> str:
         def ensure_str_attributes(element: ET.Element):
-            """Rekurencyjnie zapewnia, że wszystkie wartości atrybutów są stringami."""
-            for key, value in list(element.attrib.items()):  # Iteruj po kopii, aby móc modyfikować
+            for key, value in list(element.attrib.items()):
                 if value is None:
                     logger.warning(
                         f"SVG Attr Fix: Atrybut '{key}' elementu '{element.tag}' miał wartość None. Zastępuję pustym stringiem.")
@@ -113,7 +112,7 @@ class SVGDiagram:
             for child in element:
                 ensure_str_attributes(child)
 
-        ensure_str_attributes(self.svg_root)  # Przejdź przez całe drzewo przed serializacją
+        ensure_str_attributes(self.svg_root)
 
         try:
             if hasattr(ET, 'indent'):
@@ -126,7 +125,7 @@ class SVGDiagram:
 def svg_add_device_to_diagram(
         svg_diagram: SVGDiagram,
         prepared_data: DeviceDisplayData,
-        api_client: LibreNMSAPI,
+        api_client: LibreNMSAPI,  # Nie jest już używane bezpośrednio tutaj
         position: Tuple[float, float],
         device_internal_idx: int,
         drawio_styles_ref: DrawioStyleInfoRef,
@@ -134,6 +133,7 @@ def svg_add_device_to_diagram(
 ) -> Optional[Dict[Any, PortEndpointData]]:
     port_map_for_device_svg: Dict[Any, PortEndpointData] = {}
     offset_x, offset_y = position
+    interface_replacements_cfg = config.get('interface_name_replacements', {})
 
     current_host_identifier = prepared_data.canonical_identifier
     logger.info(
@@ -243,11 +243,30 @@ def svg_add_device_to_diagram(
             ep_abs_x, ep_abs_y, ep_id = offset_x + center_x_p_rel, offset_y + conn_epy_rel, f"ep_svg_{device_internal_idx}_{p_svg_base_id}"
             ep_data = PortEndpointData(ep_id, ep_abs_x, ep_abs_y, conn_orient)
 
-            p_name_api = p_info.get('ifName')
             if p_ifidx is not None: port_map_for_device_svg[f"ifindex_{p_ifidx}"] = ep_data
             if p_id_api is not None: port_map_for_device_svg[f"portid_{p_id_api}"] = ep_data
-            if p_name_api: port_map_for_device_svg[p_name_api.lower()] = ep_data
             port_map_for_device_svg[vis_num_str] = ep_data
+
+            p_name_api = str(p_info.get('ifName', '')).strip()
+            if p_name_api:
+                port_map_for_device_svg[p_name_api.lower()] = ep_data
+                normalized_p_name = normalize_interface_name(p_name_api, interface_replacements_cfg)
+                if normalized_p_name.lower() != p_name_api.lower():
+                    port_map_for_device_svg[normalized_p_name.lower()] = ep_data
+
+            p_alias_api = str(p_info.get('ifAlias', '')).strip()
+            if p_alias_api and p_alias_api.lower() != p_name_api.lower():
+                port_map_for_device_svg[p_alias_api.lower()] = ep_data
+                normalized_p_alias = normalize_interface_name(p_alias_api, interface_replacements_cfg)
+                if normalized_p_alias.lower() != p_alias_api.lower() and normalized_p_alias.lower() != p_name_api.lower():
+                    port_map_for_device_svg[normalized_p_alias.lower()] = ep_data
+
+            p_descr_api = str(p_info.get('ifDescr', '')).strip()
+            if p_descr_api and p_descr_api.lower() != p_name_api.lower() and p_descr_api.lower() != p_alias_api.lower():
+                port_map_for_device_svg[p_descr_api.lower()] = ep_data
+                normalized_p_descr = normalize_interface_name(p_descr_api, interface_replacements_cfg)
+                if normalized_p_descr.lower() != p_descr_api.lower() and normalized_p_descr.lower() != p_name_api.lower() and normalized_p_descr.lower() != p_alias_api.lower():
+                    port_map_for_device_svg[normalized_p_descr.lower()] = ep_data
 
             alias_txt = str(p_info.get("ifAlias", "")).strip()
             if alias_txt:
@@ -335,11 +354,15 @@ def svg_add_device_to_diagram(
                                  offset_y + mgmt0_y + port_height_cfg / 2
         ep_data_m = PortEndpointData(mgmt0_ep_id, ep_abs_x_m, ep_abs_y_m, "right")
 
-        mgmt0_name_api = mgmt0_info.get('ifName')
         if mgmt0_ifidx is not None: port_map_for_device_svg[f"ifindex_{mgmt0_ifidx}"] = ep_data_m
         if mgmt0_pid is not None: port_map_for_device_svg[f"portid_{mgmt0_pid}"] = ep_data_m
-        if mgmt0_name_api: port_map_for_device_svg[mgmt0_name_api.lower()] = ep_data_m
         port_map_for_device_svg["mgmt0"] = ep_data_m
+        mgmt0_name_api = str(mgmt0_info.get('ifName', '')).strip()
+        if mgmt0_name_api:
+            port_map_for_device_svg[mgmt0_name_api.lower()] = ep_data_m
+            normalized_mgmt0_name = normalize_interface_name(mgmt0_name_api, interface_replacements_cfg)
+            if normalized_mgmt0_name.lower() != mgmt0_name_api.lower():
+                port_map_for_device_svg[normalized_mgmt0_name.lower()] = ep_data_m
 
         alias_txt_m = str(mgmt0_info.get("ifAlias", "")).strip()
         if alias_txt_m:
@@ -363,6 +386,7 @@ def svg_add_device_to_diagram(
 
     svg_diagram.add_element(device_group_main_svg)
 
+    # ... (reszta funkcji svg_add_device_to_diagram, czyli tworzenie etykiety informacyjnej, pozostaje bez zmian) ...
     dev_api_info_data = prepared_data.device_api_info
     dev_id_val = dev_api_info_data.get('device_id', 'N/A')
     hostname_raw = dev_api_info_data.get('hostname', '')
@@ -411,7 +435,6 @@ def svg_add_device_to_diagram(
     def add_text_node_xhtml(parent_el, text_content, tag="span", is_bold=False, class_name=None):
         actual_tag = f"{{{xhtml_ns}}}{tag}"
         el = ET.SubElement(parent_el, actual_tag)
-        # Tekst musi być stringiem, nawet jeśli pustym
         safe_text_content = str(text_content) if text_content is not None else ""
         if is_bold:
             b_tag = ET.SubElement(el, f"{{{xhtml_ns}}}b")
@@ -422,7 +445,7 @@ def svg_add_device_to_diagram(
         return el
 
     title_el = ET.SubElement(div_container, f"{{{xhtml_ns}}}b")
-    title_el.text = str(display_name_main)  # Upewnij się, że jest stringiem
+    title_el.text = str(display_name_main)
     ET.SubElement(div_container, f"{{{xhtml_ns}}}br")
 
     if ports_limit_info_text_svg:
@@ -520,7 +543,7 @@ def svg_add_device_to_diagram(
 
     info_lbl_abs_x, info_lbl_abs_y = offset_x - info_label_width - info_label_margin_cfg, \
                                      offset_y + (chassis_height / 2) - (info_lbl_h_approx / 2)
-    grid_margin_y_cfg = config.get('grid_margin_y')
+    grid_margin_y_cfg = config.get('grid_margin_y', 350.0)
     info_lbl_abs_y = max((float(grid_margin_y_cfg) / 3), info_lbl_abs_y)
 
     foreign_object = ET.Element("foreignObject",
@@ -554,12 +577,10 @@ def svg_draw_connection(svg_diagram: SVGDiagram,
                         config: Dict[str, Any]):
     if not source_port_data or not target_port_data: return
 
-    conn_stroke_color_conf = config.get('connection_stroke_color')  # Powinien być string z config_map
-    conn_stroke_width = config.get('connection_stroke_width')  # Powinien być string z config_map
+    conn_stroke_color_conf = config.get('connection_stroke_color', "#FF9900")  # Domyślny pomarańczowy
+    conn_stroke_width = config.get('connection_stroke_width', "1.5")
 
-    # Zabezpieczenie: jeśli conn_stroke_color_conf jest None, użyj domyślnego koloru (np. 'black')
-    effective_stroke_color_key = conn_stroke_color_conf if conn_stroke_color_conf is not None else "black"
-    final_stroke_color = SVG_STROKE_MAP.get(effective_stroke_color_key, effective_stroke_color_key)
+    final_stroke_color = SVG_STROKE_MAP.get(conn_stroke_color_conf, conn_stroke_color_conf)
 
     path_d_parts = [f"M {source_port_data.x:.2f},{source_port_data.y:.2f}"]
 
@@ -584,6 +605,6 @@ def svg_draw_connection(svg_diagram: SVGDiagram,
         label_x = (wp_sx + wp_tx) / 2
         label_y = (wp_sy + wp_ty) / 2
         vlan_text_el = ET.Element("text", {"x": f"{label_x:.2f}", "y": f"{label_y:.2f}", "class": "connection-label"})
-        vlan_text_el.set("dy", "-2px")  # Użyj set dla atrybutów
+        vlan_text_el.set("dy", "-2px")
         vlan_text_el.text = f"VLAN {vlan_label}"
         svg_diagram.add_element(vlan_text_el)

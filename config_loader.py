@@ -2,13 +2,15 @@
 import configparser
 import os
 import logging
-import sys  # Potrzebne do bloku testowego if __name__ == '__main__':
+import sys
+import json
 from typing import Dict, Any, List, Optional, Union, Set
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_FILE = "config.ini"  # Domyślna nazwa, może być nadpisana
+DEFAULT_CONFIG_FILE = "config.ini"
+DEFAULT_CLI_CREDENTIALS_JSON_FILE = "cli_credentials.json"
 
 
 def _parse_interface_replacements(value: str) -> Dict[str, str]:
@@ -41,6 +43,7 @@ def _get_typed_value(config_parser: configparser.ConfigParser, section: str, opt
     Jeśli opcja nie istnieje w pliku .ini, używa default_value.
     Jeśli opcja istnieje w .ini ale jest pusta (dla stringów), a default_value jest
     niepustym stringiem, używa default_value (ważne dla regexów i szablonów).
+    Automatycznie usuwa cudzysłowy otaczające wartości stringów z .ini.
     """
     source_log = f"z pliku .ini ({section}/{option})"
     try:
@@ -50,50 +53,126 @@ def _get_typed_value(config_parser: configparser.ConfigParser, section: str, opt
             val = config_parser.getint(section, option)
         elif expected_type == float:
             val = config_parser.getfloat(section, option)
-        elif expected_type == list:  # Dla list stringów oddzielonych przecinkami
-            value_str = config_parser.get(section, option)
+        elif expected_type == list:
+            value_str_raw = config_parser.get(section, option)
+            # Usuń cudzysłowy, jeśli są, przed podziałem
+            value_str = value_str_raw.strip()
+            if (value_str.startswith('"') and value_str.endswith('"')) or \
+                    (value_str.startswith("'") and value_str.endswith("'")):
+                value_str = value_str[1:-1]
             val = [item.strip() for item in value_str.split(',') if item.strip()]
-        elif expected_type == dict and option == "interface_name_replacements":  # Specjalna obsługa
-            value_str = config_parser.get(section, option)
+        elif expected_type == dict and option == "interface_name_replacements":
+            value_str_raw = config_parser.get(section, option)
+            value_str = value_str_raw.strip()
+            if (value_str.startswith('"') and value_str.endswith('"')) or \
+                    (value_str.startswith("'") and value_str.endswith("'")):
+                value_str = value_str[1:-1]
             val = _parse_interface_replacements(value_str)
-        elif expected_type == set:  # Dla zbiorów stringów oddzielonych przecinkami
-            value_str = config_parser.get(section, option)
+        elif expected_type == set:
+            value_str_raw = config_parser.get(section, option)
+            value_str = value_str_raw.strip()
+            if (value_str.startswith('"') and value_str.endswith('"')) or \
+                    (value_str.startswith("'") and value_str.endswith("'")):
+                value_str = value_str[1:-1]
             val = _parse_string_set(value_str)
-        elif expected_type == str:  # Jawna obsługa stringów
-            val_str = config_parser.get(section, option)
-            # Jeśli odczytano pusty string z .ini, a domyślna wartość jest sensownym (niepustym) stringiem,
-            # użyj wartości domyślnej. Jest to ważne np. dla regexów lub ścieżek szablonów.
+        elif expected_type == str:
+            val_str_raw = config_parser.get(section, option)
+            val_str = val_str_raw.strip()
+            if (val_str.startswith('"') and val_str.endswith('"')) or \
+                    (val_str.startswith("'") and val_str.endswith("'")):
+                val_str = val_str[1:-1]
+                logger.debug(
+                    f"Usunięto cudzysłowy otaczające dla opcji '{option}' w sekcji '{section}'. Oryginalna wartość z .ini: '{val_str_raw}', po usunięciu: '{val_str}'")
+
             if not val_str.strip() and default_value is not None and isinstance(default_value,
                                                                                 str) and default_value.strip():
                 logger.debug(
-                    f"Opcja '{option}' w sekcji '{section}' pliku .ini jest pusta lub zawiera tylko białe znaki. Używam wartości domyślnej z kodu: '{default_value}'")
+                    f"Opcja '{option}' w sekcji '{section}' pliku .ini jest pusta (po ew. usunięciu cudzysłowów). Używam wartości domyślnej z kodu: '{default_value}'")
                 return default_value
             val = val_str
-        else:  # Dla innych, nieprzewidzianych typów (choć config_map powinien je pokryć)
+        else:
             val = config_parser.get(section, option)
-
-        # logger.debug(f"Odczytano '{option}' {source_log} jako '{val}'.")
         return val
     except (configparser.NoSectionError, configparser.NoOptionError):
-        # logger.debug(f"Opcja '{option}' nie znaleziona w sekcji '{section}' pliku .ini. Używam wartości domyślnej: {default_value}")
         return default_value
     except ValueError as e:
         logger.error(
             f"Błąd konwersji wartości dla {section}/{option} {source_log} na typ {expected_type}: {e}. Używam wartości domyślnej: {default_value}")
         return default_value
-    except Exception as e_get_typed:  # Ogólny wyjątek dla bezpieczeństwa
+    except Exception as e_get_typed:
         logger.error(
             f"Nieoczekiwany błąd w _get_typed_value dla {section}/{option}: {e_get_typed}. Używam wartości domyślnej: {default_value}",
             exc_info=True)
         return default_value
 
 
+def _load_cli_credentials_from_json(filepath: str) -> Optional[Dict[str, Any]]:
+    """Wczytuje poświadczenia CLI z pliku JSON."""
+    logger.info(f"Próba wczytania poświadczeń CLI z pliku JSON: '{filepath}'")
+    if not os.path.exists(filepath):
+        logger.warning(f"Plik JSON z poświadczeniami CLI '{filepath}' nie został znaleziony.")
+        return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            creds = json.load(f)
+
+        if not isinstance(creds, dict):
+            logger.error(
+                f"Główny element w pliku JSON z poświadczeniami '{filepath}' nie jest słownikiem (otrzymano {type(creds)}).")
+            return None
+
+        defaults_creds = creds.get("defaults")
+        if defaults_creds is None:
+            logger.debug(f"Brak sekcji 'defaults' w pliku poświadczeń JSON '{filepath}'. Ustawiam na pusty słownik.")
+            creds["defaults"] = {}
+        elif not isinstance(defaults_creds, dict):
+            logger.warning(
+                f"Sekcja 'defaults' w pliku poświadczeń JSON '{filepath}' nie jest słownikiem (jest {type(defaults_creds)}). Ignoruję ją.")
+            creds["defaults"] = {}
+
+        devices_list = creds.get("devices")
+        if devices_list is None:
+            logger.debug(f"Brak sekcji 'devices' w pliku poświadczeń JSON '{filepath}'. Ustawiam na pustą listę.")
+            creds["devices"] = []
+        elif not isinstance(devices_list, list):
+            logger.warning(
+                f"Sekcja 'devices' w pliku poświadczeń JSON '{filepath}' nie jest listą (jest {type(devices_list)}). Ignoruję ją.")
+            creds["devices"] = []
+        else:
+            valid_devices = []
+            for i, device_entry in enumerate(devices_list):
+                if not isinstance(device_entry, dict) or \
+                        not device_entry.get("identifier") or \
+                        not device_entry.get("cli_user") or \
+                        not device_entry.get("cli_pass"):
+                    logger.warning(
+                        f"Niekompletny lub nieprawidłowy wpis dla urządzenia #{i} w pliku '{filepath}'. Wymagane pola: identifier, cli_user, cli_pass. Pomijam wpis: {device_entry}")
+                    continue
+
+                match_val = str(device_entry.get("match", "exact")).lower().strip()
+                if match_val not in ["exact", "regex"]:
+                    logger.warning(
+                        f"Nieprawidłowa wartość 'match' ('{device_entry.get('match')}') dla urządzenia '{device_entry.get('identifier')}'. Ustawiam na 'exact'.")
+                    match_val = "exact"
+                device_entry["match"] = match_val
+                valid_devices.append(device_entry)
+            creds["devices"] = valid_devices
+
+        logger.info(
+            f"Pomyślnie wczytano i przetworzono poświadczenia CLI z pliku JSON: '{filepath}'. Domyślne: {'TAK' if creds.get('defaults') else 'NIE'}, Wpisy urządzeń: {len(creds.get('devices', []))}.")
+        return creds
+    except json.JSONDecodeError as e:
+        logger.error(
+            f"Błąd parsowania pliku JSON z poświadczeniami CLI '{filepath}': {e}. Poświadczenia CLI nie zostaną wczytane z tego pliku.")
+        return None
+    except Exception as e:
+        logger.error(
+            f"Nieoczekiwany błąd podczas odczytu pliku JSON z poświadczeniami CLI '{filepath}': {e}. Poświadczenia CLI nie zostaną wczytane z tego pliku.",
+            exc_info=True)
+        return None
+
+
 def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
-    """
-    Wczytuje konfigurację z pliku .ini.
-    Jeśli plik .ini nie istnieje lub opcja w nim nie istnieje, używa wartości domyślnych
-    zdefiniowanych w `config_map`.
-    """
     config_parser = configparser.ConfigParser(allow_no_value=True, inline_comment_prefixes=('#', ';'))
     parsed_config: Dict[str, Any] = {}
     config_file_found_and_parsed = False
@@ -115,7 +194,6 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
                 f"Błąd parsowania pliku konfiguracyjnego '{config_path}': {e}. Użyte zostaną wartości domyślne.")
 
     config_map = {
-        # DEFAULT
         "log_level": ("DEFAULT", "log_level", str, "INFO"),
         "log_to_file": ("DEFAULT", "log_to_file", bool, True),
         "log_file_name": ("DEFAULT", "log_file_name", str, "auto_net_diagram_creator.log"),
@@ -125,18 +203,13 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
         "diagram_template_file": ("DEFAULT", "diagram_template_file", str, "switch.drawio"),
         "diagram_output_drawio_file": ("DEFAULT", "diagram_output_drawio_file", str, "network_diagram.drawio"),
         "diagram_output_svg_file": ("DEFAULT", "diagram_output_svg_file", str, "network_diagram.svg"),
-
-        # LibreNMS
         "api_timeout": ("LibreNMS", "api_timeout", int, 20),
         "verify_ssl": ("LibreNMS", "verify_ssl", bool, False),
-
-        # Discovery
         "default_snmp_communities": ("Discovery", "default_snmp_communities", list, ["public"]),
         "snmp_timeout": ("Discovery", "snmp_timeout", int, 5),
         "snmp_retries": ("Discovery", "snmp_retries", int, 1),
         "enable_cli_discovery": ("Discovery", "enable_cli_discovery", bool, True),
-
-        # CLI
+        "cli_credentials_json_file": ("Discovery", "cli_credentials_json_file", str, DEFAULT_CLI_CREDENTIALS_JSON_FILE),
         "cli_global_delay_factor": ("CLI", "global_delay_factor", float, 5.0),
         "cli_session_log_file_mode": ("CLI", "session_log_file_mode", str, "append"),
         "cli_conn_timeout": ("CLI", "conn_timeout", int, 75),
@@ -147,19 +220,16 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
         "cli_default_expect_string_pattern": ("CLI", "default_expect_string_pattern", str, r"[a-zA-Z0-9\S\.\-]*[#>]"),
         "cli_netmiko_session_log_template": ("CLI", "netmiko_session_log_template", str, "{host}_netmiko_session.log"),
         "cli_junos_try_cdp": ("CLI", "cli_junos_try_cdp", bool, False),
-
         "prompt_regex_slot_sys": ("CLI", "prompt_regex_slot_sys", str, r'(?:\*\s*)?Slot-\d+\s+[\w.-]+\s*#\s*$'),
         "prompt_regex_simple": ("CLI", "prompt_regex_simple", str, r"^[a-zA-Z0-9][\w.-]*[>#]\s*$"),
         "prompt_regex_nxos": ("CLI", "prompt_regex_nxos", str, r"^[a-zA-Z0-9][\w.-]*#\s*$"),
         "prompt_regex_ios": ("CLI", "prompt_regex_ios", str, r"^[a-zA-Z0-9][\w.-]*[>#]\s*$"),
-
         "lldp_regex_block_split": ("CLI", "lldp_regex_block_split", str, r'\n\s*(?=Chassis id:)'),
         "lldp_regex_local_port_id": ("CLI", "lldp_regex_local_port_id", str, r'^Local Port id:\s*(.+?)\s*$'),
         "lldp_regex_sys_name": ("CLI", "lldp_regex_sys_name", str, r'^System Name:\s*(.+?)\s*$'),
         "lldp_regex_remote_port_id": ("CLI", "lldp_regex_remote_port_id", str, r'^Port id:\s*(.+?)\s*$'),
         "lldp_regex_remote_port_desc": ("CLI", "lldp_regex_remote_port_desc", str, r'^Port Description:\s*(.+?)\s*$'),
         "lldp_regex_vlan_id": ("CLI", "lldp_regex_vlan_id", str, r'^(?:Port and )?Vlan ID:\s*([0-9]+)\s*$'),
-
         "cdp_regex_block_split": ("CLI", "cdp_regex_block_split", str, r'-{10,}\s*$'),
         "cdp_regex_device_id": ("CLI", "cdp_regex_device_id", str, r'Device ID:\s*(\S+)'),
         "cdp_regex_local_if": ("CLI", "cdp_regex_local_if", str, r'Interface:\s*([^,]+(?:,\s*port\s+\S+)?)'),
@@ -167,8 +237,6 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
         "interface_name_replacements": ("CLI", "interface_name_replacements", dict,
                                         {"GigabitEthernet": "Gi", "TenGigabitEthernet": "Te", "FastEthernet": "Fa",
                                          "Port-channel": "Po"}),
-
-        # PortClassification
         "physical_name_patterns_re": ("PortClassification", "physical_name_patterns_re", str,
                                       r'^(Eth|Gi|Te|Fa|Hu|Twe|Fo|mgmt|Management|Serial|Port\s?\d|SFP|XFP|QSFP|em\d|ens\d|eno\d|enp\d+s\d+|ge-|xe-|et-|bri|lan\d|po\d+|Stk|Stack|CHASSIS|StackPort)'),
         "stack_port_pattern_re": ("PortClassification", "stack_port_pattern_re", str, r'^[a-zA-Z]+[-]?\d+/\d+(/\d+)+$'),
@@ -185,8 +253,6 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
                                    {'l3ipvlan', 'softwareloopback', 'tunnel', 'propmultiplexor', 'bridge', 'other',
                                     'l2vlan', 'voiceoverip', 'atmsubinterface', 'virtualipaddress', 'mpovalink',
                                     'ianavielf'}),
-
-        # DiagramLayout
         "devices_per_row": ("DiagramLayout", "devices_per_row", int, 3),
         "grid_margin_x": ("DiagramLayout", "grid_margin_x", int, 450),
         "grid_margin_y": ("DiagramLayout", "grid_margin_y", int, 350),
@@ -206,8 +272,6 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
         "default_ports_per_row_large_device": ("DiagramLayout", "default_ports_per_row_large_device", int, 55),
         "stack_detection_threshold_factor": ("DiagramLayout", "stack_detection_threshold_factor", int, 2),
         "stack_detection_threshold_offset": ("DiagramLayout", "stack_detection_threshold_offset", int, 4),
-
-        # DiagramElements
         "port_width": ("DiagramElements", "port_width", float, 20.0),
         "port_height": ("DiagramElements", "port_height", float, 20.0),
         "waypoint_offset": ("DiagramElements", "waypoint_offset", float, 20.0),
@@ -222,8 +286,6 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
         "info_label_margin_from_chassis": ("DiagramElements", "info_label_margin_from_chassis", float, 30.0),
         "info_label_min_width": ("DiagramElements", "info_label_min_width", float, 180.0),
         "info_label_max_width": ("DiagramElements", "info_label_max_width", float, 280.0),
-
-        # SVGSpecific
         "svg_default_font_family": ("SVGSpecific", "svg_default_font_family", str, "Arial, Helvetica, sans-serif"),
         "svg_info_label_padding": ("SVGSpecific", "svg_info_label_padding", str, "5px"),
         "svg_default_text_color": ("SVGSpecific", "default_text_color", str, "black"),
@@ -250,13 +312,6 @@ def load_config(config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
 
 
 def get_env_config(env_file_path: str = ".env", config_ini_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
-    """
-    Wczytuje konfigurację: najpierw z pliku .ini (z wartościami domyślnymi z kodu),
-    a następnie z pliku .env (lub zmiennych środowiskowych).
-    Wartości z .env mają pierwszeństwo dla kluczy, które są jawnie mapowane
-    do nadpisania (np. base_url, api_key, log_level).
-    Dane logowania CLI są wczytywane tylko z .env.
-    """
     app_config = load_config(config_ini_path)
     logger.debug(f"Konfiguracja bazowa załadowana z '{config_ini_path}' (lub domyślnych).")
 
@@ -274,39 +329,30 @@ def get_env_config(env_file_path: str = ".env", config_ini_path: str = DEFAULT_C
         "LOG_LEVEL": "log_level",
         "API_TIMEOUT": "api_timeout",
         "VERIFY_SSL": "verify_ssl",
-        # Można dodać więcej, np. dla szablonu logów Netmiko, jeśli chcemy, aby .env miał pierwszeństwo
-        # "CLI_NETMIKO_SESSION_LOG_TEMPLATE_ENV": "cli_netmiko_session_log_template",
     }
 
     for env_var_name, config_key_name in env_vars_to_override_ini.items():
         env_value = os.getenv(env_var_name)
-        if env_value is not None:  # Zmienna środowiskowa istnieje
+        if env_value is not None:
             original_value_from_ini_or_default = app_config.get(config_key_name)
             try:
-                # Jeśli zmienna środowiskowa jest PUSTYM stringiem, a oryginalna wartość (z .ini lub kodu)
-                # była NIEPUSTYM stringiem, chcemy ZACHOWAĆ oryginalną wartość.
-                # Zapobiega to sytuacji, gdy np. `LOG_LEVEL=` w .env kasuje `log_level=DEBUG` z .ini.
                 if isinstance(original_value_from_ini_or_default, str) and \
                         original_value_from_ini_or_default.strip() and \
-                        not env_value.strip():  # env_value jest pusty
+                        not env_value.strip():
                     logger.debug(
                         f"Zmienna środowiskowa '{env_var_name}' jest pusta, ale wartość z .ini/domyślna dla '{config_key_name}' ('{original_value_from_ini_or_default}') nie jest. Zachowuję wartość z .ini/domyślną.")
                     converted_value = original_value_from_ini_or_default
-                # W przeciwnym razie, dokonaj konwersji i użyj wartości z .env
                 elif config_key_name == "verify_ssl":
                     converted_value = env_value.lower() == 'true'
                 elif config_key_name == "api_timeout" and env_value.isdigit():
                     converted_value = int(env_value)
-                else:  # Domyślnie string, w tym przypadku użyj wartości z env_value
+                else:
                     converted_value = env_value
 
                 if converted_value != original_value_from_ini_or_default:
                     logger.info(
                         f"Nadpisano '{config_key_name}' wartością ze zmiennej środowiskowej '{env_var_name}'. Nowa wartość: '{converted_value}', poprzednia: '{original_value_from_ini_or_default}'.")
                     app_config[config_key_name] = converted_value
-                else:
-                    logger.debug(
-                        f"Wartość dla '{config_key_name}' ze zmiennej środowiskowej '{env_var_name}' ('{env_value}') jest taka sama jak w .ini/domyślna. Bez zmian.")
             except Exception as e_conv:
                 logger.error(
                     f"Błąd konwersji wartości '{env_value}' dla zmiennej '{env_var_name}' (klucz config: '{config_key_name}'): {e_conv}. Pozostawiono wartość z .ini/domyślną.")
@@ -320,48 +366,69 @@ def get_env_config(env_file_path: str = ".env", config_ini_path: str = DEFAULT_C
         logger.critical(msg)
         raise ValueError(msg)
 
-    cli_credentials_structure = {
-        "defaults": {},
-        "devices": []
-    }
-    default_cli_user_env = os.getenv("CLI_USER_DEFAULT")
-    default_cli_pass_env = os.getenv("CLI_PASS_DEFAULT")
-    if default_cli_user_env and default_cli_pass_env:
-        cli_credentials_structure["defaults"]["cli_user"] = default_cli_user_env
-        cli_credentials_structure["defaults"]["cli_pass"] = default_cli_pass_env
-        logger.debug("Wczytano domyślne poświadczenia CLI z .env.")
+    # --- Ładowanie poświadczeń CLI ---
+    cli_credentials_json_file_path_raw = app_config.get("cli_credentials_json_file", DEFAULT_CLI_CREDENTIALS_JSON_FILE)
+    cli_credentials_json_file_path = str(
+        cli_credentials_json_file_path_raw or "").strip()  # Upewnij się, że to string i usuń białe znaki
 
-    i = 1
-    while True:
-        dev_id_env = os.getenv(f"CLI_DEVICE_{i}_ID")
-        dev_user_env = os.getenv(f"CLI_DEVICE_{i}_USER")
-        dev_pass_env = os.getenv(f"CLI_DEVICE_{i}_PASS")
-        dev_match_env = os.getenv(f"CLI_DEVICE_{i}_MATCH", "exact")
+    # Usuń cudzysłowy, jeśli są częścią odczytanej ścieżki
+    if (cli_credentials_json_file_path.startswith('"') and cli_credentials_json_file_path.endswith('"')) or \
+            (cli_credentials_json_file_path.startswith("'") and cli_credentials_json_file_path.endswith("'")):
+        cli_credentials_json_file_path = cli_credentials_json_file_path[1:-1]
+        logger.debug(
+            f"Usunięto cudzysłowy otaczające ze ścieżki pliku poświadczeń CLI. Nowa ścieżka: '{cli_credentials_json_file_path}'")
 
-        if dev_id_env and dev_user_env and dev_pass_env:
-            cli_credentials_structure["devices"].append({
-                "identifier": dev_id_env,
-                "match": dev_match_env.lower(),
-                "cli_user": dev_user_env,
-                "cli_pass": dev_pass_env
-            })
-            i += 1
-        else:
-            if dev_id_env and not (dev_user_env and dev_pass_env):
-                logger.warning(
-                    f"Niekompletne specyficzne poświadczenia CLI dla CLI_DEVICE_{i}_ID='{dev_id_env}'. Pomijam ten wpis.")
-            if i == 1 and not dev_id_env:
-                logger.debug("Nie znaleziono żadnych specyficznych wpisów CLI_DEVICE_* w .env.")
-            break
+    logger.info(
+        f"Próba wczytania poświadczeń CLI z pliku JSON skonfigurowanego jako: '{cli_credentials_json_file_path}'")
 
-    app_config['cli_credentials'] = cli_credentials_structure
-    if cli_credentials_structure['devices'] or cli_credentials_structure['defaults']:
-        logger.info(
-            f"Wczytano {len(cli_credentials_structure['devices'])} specyficznych wpisów poświadczeń CLI i {'domyślne ' if cli_credentials_structure['defaults'] else 'brak domyślnych '}poświadczeń z .env.")
+    cli_creds_from_json = _load_cli_credentials_from_json(cli_credentials_json_file_path)
+
+    if cli_creds_from_json:
+        app_config['cli_credentials'] = cli_creds_from_json
+        logger.info(f"Poświadczenia CLI załadowane z pliku JSON: '{cli_credentials_json_file_path}'.")
     else:
-        logger.info("Nie znaleziono żadnych poświadczeń CLI (domyślnych ani specyficznych) w pliku .env.")
+        logger.warning(
+            f"Nie udało się załadować poświadczeń CLI z pliku JSON ('{cli_credentials_json_file_path}'). Próba załadowania z zmiennych środowiskowych .env jako fallback...")
+        cli_credentials_structure_env = {"defaults": {}, "devices": []}
+        default_cli_user_env = os.getenv("CLI_USER_DEFAULT")
+        default_cli_pass_env = os.getenv("CLI_PASS_DEFAULT")
+        if default_cli_user_env and default_cli_pass_env:
+            cli_credentials_structure_env["defaults"]["cli_user"] = default_cli_user_env
+            cli_credentials_structure_env["defaults"]["cli_pass"] = default_cli_pass_env
+            logger.debug("Wczytano domyślne poświadczenia CLI z .env (fallback).")
 
-    logger.info("Konfiguracja aplikacji wczytana i połączona (.ini + .env).")
+        i = 1
+        while True:
+            dev_id_env = os.getenv(f"CLI_DEVICE_{i}_ID")
+            dev_user_env = os.getenv(f"CLI_DEVICE_{i}_USER")
+            dev_pass_env = os.getenv(f"CLI_DEVICE_{i}_PASS")
+            dev_match_env = os.getenv(f"CLI_DEVICE_{i}_MATCH", "exact")
+
+            if dev_id_env and dev_user_env and dev_pass_env:
+                cli_credentials_structure_env["devices"].append({
+                    "identifier": dev_id_env,
+                    "match": dev_match_env.lower(),
+                    "cli_user": dev_user_env,
+                    "cli_pass": dev_pass_env
+                })
+                i += 1
+            else:
+                if dev_id_env and not (dev_user_env and dev_pass_env):
+                    logger.warning(
+                        f"Niekompletne specyficzne poświadczenia CLI z .env dla CLI_DEVICE_{i}_ID='{dev_id_env}'. Pomijam ten wpis.")
+                if i == 1 and not dev_id_env:
+                    logger.debug("Nie znaleziono żadnych specyficznych wpisów CLI_DEVICE_* w .env (fallback).")
+                break
+
+        app_config['cli_credentials'] = cli_credentials_structure_env
+        if cli_credentials_structure_env['devices'] or cli_credentials_structure_env['defaults']:
+            logger.info(
+                f"Wczytano {len(cli_credentials_structure_env['devices'])} specyficznych wpisów poświadczeń CLI i {'domyślne ' if cli_credentials_structure_env['defaults'] else 'brak domyślnych '}poświadczeń z .env (fallback).")
+        else:
+            logger.info("Nie znaleziono żadnych poświadczeń CLI ani w pliku JSON, ani w .env (fallback).")
+    # --- Koniec ładowania poświadczeń CLI ---
+
+    logger.info("Konfiguracja aplikacji wczytana i połączona.")
     config_to_log_final = {
         k: (f"{type(v).__name__} (len:{len(v)})" if isinstance(v, (list, dict, set)) and len(str(v)) > 60 else v)
         for k, v in app_config.items()
@@ -369,18 +436,20 @@ def get_env_config(env_file_path: str = ".env", config_ini_path: str = DEFAULT_C
     }
     cli_creds_log = app_config.get('cli_credentials', {})
     if cli_creds_log.get('defaults'):
-        config_to_log_final['cli_credentials_defaults_user'] = cli_creds_log['defaults'].get('cli_user')
+        config_to_log_final['cli_credentials_defaults_user'] = cli_creds_log['defaults'].get('cli_user', 'N/A')
+    else:
+        config_to_log_final['cli_credentials_defaults_user'] = 'Brak (z JSON/env)'
+
     if cli_creds_log.get('devices'):
         config_to_log_final['cli_credentials_devices_count'] = len(cli_creds_log['devices'])
+    else:
+        config_to_log_final['cli_credentials_devices_count'] = 0
 
     logger.debug("Finalna konfiguracja aplikacji (fragment, bez sekretów): %s", config_to_log_final)
     return app_config
 
 
 def get_communities_to_try(config: Dict[str, Any]) -> List[str]:
-    """
-    Pobiera listę community SNMP do próby z konfiguracji.
-    """
     default_communities = config.get("default_snmp_communities", [])
     if not isinstance(default_communities, list):
         logger.warning(
@@ -390,7 +459,6 @@ def get_communities_to_try(config: Dict[str, Any]) -> List[str]:
 
 
 if __name__ == '__main__':
-    # Prosty test wczytywania konfiguracji
     test_logger_main = logging.getLogger()
     test_logger_main.setLevel(logging.DEBUG)
     if not test_logger_main.hasHandlers():
@@ -407,70 +475,65 @@ if __name__ == '__main__':
 
     logger.info("Testowanie config_loader.py...")
 
-    # Utwórz globalną config_map używaną przez load_config, aby testy były spójne
-    # Ta mapa jest kopią tej zdefiniowanej w load_config, ale możemy ją tu jawnie użyć dla pewności
-    # w kontekście testów. W normalnym działaniu, load_config używa swojej wewnętrznej mapy.
-    CONFIG_MAP_FOR_TESTING = {
-        "log_level": ("DEFAULT", "log_level", str, "INFO_FROM_MAP_DEFAULT"),  # Zmieniona domyślna dla testu
-        "cli_netmiko_session_log_template": ("CLI", "netmiko_session_log_template", str, "{host}_netmiko_from_map.log"),
-        "lldp_regex_block_split": ("CLI", "lldp_regex_block_split", str, r'\n\s*(?=Chassis id:MAP_DEFAULT)'),
-        # Dodaj inne klucze, jeśli chcesz je specyficznie testować z innymi wartościami domyślnymi
-    }
+    TEST_CREDS_JSON_FILE_MAIN = "test_cli_creds_main.json"
+    TEST_CONFIG_INI_MAIN = "config.test_main.ini"
+    TEST_ENV_MAIN = ".env.test_main"
 
-    with open(".env.test_cl", "w", encoding="utf-8") as f_env:
-        f_env.write("LIBRENMS_BASE_URL=http://test-librenms.example.com/api/v0\n")
-        f_env.write("LIBRENMS_API_KEY=testapikeyfromenv\n")
-        f_env.write("LOG_LEVEL=DEBUG_FROM_ENV\n")
-        f_env.write("CLI_NETMIKO_SESSION_LOG_TEMPLATE=\n")  # Pusty w .env
+    EXPECTED_DEFAULT_LLDP_BLOCK_SPLIT = r'\n\s*(?=Chassis id:)'
+    EXPECTED_DEFAULT_NETMIKO_LOG_TEMPLATE = "{host}_netmiko_session.log"
+    EXPECTED_DEFAULT_IP_LIST_FILE = "ip_list.txt"
+    EXPECTED_DEFAULT_SNMP_COMMUNITIES = ["public"]
 
-    with open("config.test_cl.ini", "w", encoding="utf-8") as f_ini:
-        f_ini.write("[DEFAULT]\n")
-        f_ini.write("log_level = INFO_FROM_INI\n")
+    with open(TEST_CREDS_JSON_FILE_MAIN, "w", encoding="utf-8") as f_json:
+        json.dump({
+            "defaults": {"cli_user": "json_default_user", "cli_pass": "json_default_pass"},
+            "devices": [
+                {"identifier": "router.json", "match": "exact", "cli_user": "json_user1", "cli_pass": "json_pass1"}]
+        }, f_json)
+
+    with open(TEST_CONFIG_INI_MAIN, "w", encoding="utf-8") as f_ini:
+        f_ini.write("[Discovery]\n")
+        f_ini.write(f'cli_credentials_json_file = "{TEST_CREDS_JSON_FILE_MAIN}"\n')
+        f_ini.write("[DEFAULT]\nlog_level = DEBUG\n")
         f_ini.write("[CLI]\n")
-        f_ini.write("cli_netmiko_session_log_template = from_ini_{host}.log\n")  # Niepusty w .ini
-        f_ini.write("lldp_regex_block_split = \n")  # Pusty w .ini
+        f_ini.write("lldp_regex_block_split = \n")
+        f_ini.write("cli_netmiko_session_log_template = \n")
 
-    logger.info("--- Test 1: Pusty .env, niepusty .ini -> powinien być .ini ---")
-    # .env: CLI_NETMIKO_SESSION_LOG_TEMPLATE= (pusty)
-    # .ini: cli_netmiko_session_log_template = from_ini_{host}.log
-    # config_map default: {host}_netmiko_session.log (z głównej mapy w pliku)
-    # Oczekiwany: from_ini_{host}.log (bo .env pusty nie powinien kasować .ini)
-    loaded_app_config1 = get_env_config(env_file_path=".env.test_cl", config_ini_path="config.test_cl.ini")
-    assert loaded_app_config1.get("cli_netmiko_session_log_template") == "from_ini_{host}.log"
+    with open(TEST_ENV_MAIN, "w", encoding="utf-8") as f_env:
+        f_env.write("LIBRENMS_BASE_URL=http://test.com\n")
+        f_env.write("LIBRENMS_API_KEY=testkey\n")
+
+    logger.info("--- Test 1: Ładowanie poświadczeń z JSON (plik istnieje, cudzysłowy w .ini) ---")
+    config_json = get_env_config(env_file_path=TEST_ENV_MAIN, config_ini_path=TEST_CONFIG_INI_MAIN)
+    assert config_json['cli_credentials']['defaults'].get('cli_user') == "json_default_user"
+    assert len(config_json['cli_credentials']['devices']) == 1
+    assert config_json['cli_credentials']['devices'][0]['identifier'] == "router.json"
+    logger.info("  Test 1: Poświadczenia z JSON załadowane poprawnie (cudzysłowy usunięte).")
+
+    assert config_json.get("lldp_regex_block_split") == EXPECTED_DEFAULT_LLDP_BLOCK_SPLIT
     logger.info(
-        f"  Test 1 cli_netmiko_session_log_template: OK, jest '{loaded_app_config1.get('cli_netmiko_session_log_template')}'")
-    assert loaded_app_config1.get("log_level") == "DEBUG_FROM_ENV"  # .env nadpisuje .ini dla LOG_LEVEL
-    logger.info(f"  Test 1 log_level: OK, jest '{loaded_app_config1.get('log_level')}'")
+        f"  Test 1 (pusty lldp_regex_block_split w .ini): OK, użyto domyślnego '{EXPECTED_DEFAULT_LLDP_BLOCK_SPLIT}'.")
 
-    logger.info("--- Test 2: Pusty .env, PUSTY .ini -> powinien być default z config_map ---")
-    with open("config.test_cl.ini", "w", encoding="utf-8") as f_ini_empty_template:  # Nadpisz .ini
-        f_ini_empty_template.write("[CLI]\n")
-        f_ini_empty_template.write("cli_netmiko_session_log_template = \n")  # Pusty w .ini
-    # .env: CLI_NETMIKO_SESSION_LOG_TEMPLATE= (pusty)
-    # .ini: cli_netmiko_session_log_template = (pusty)
-    # config_map default: {host}_netmiko_session.log (z głównej mapy w pliku)
-    # Oczekiwany: {host}_netmiko_session.log
-    loaded_app_config2 = get_env_config(env_file_path=".env.test_cl", config_ini_path="config.test_cl.ini")
-    # Odwołujemy się do domyślnej wartości z oryginalnej config_map w module
-    original_default_template = [v[3] for k, v in load_config().items() if k == "cli_netmiko_session_log_template"][0]
-    assert loaded_app_config2.get("cli_netmiko_session_log_template") == original_default_template
+    assert config_json.get("cli_netmiko_session_log_template") == EXPECTED_DEFAULT_NETMIKO_LOG_TEMPLATE
     logger.info(
-        f"  Test 2 cli_netmiko_session_log_template: OK, jest '{loaded_app_config2.get('cli_netmiko_session_log_template')}'")
+        f"  Test 1 (pusty cli_netmiko_session_log_template w .ini, brak w .env): OK, użyto domyślnego '{EXPECTED_DEFAULT_NETMIKO_LOG_TEMPLATE}'.")
 
-    logger.info("--- Test 3: Pusty regex w .ini -> powinien być default z config_map ---")
-    with open("config.test_cl.ini", "w", encoding="utf-8") as f_ini_empty_regex:  # Nadpisz .ini
-        f_ini_empty_regex.write("[CLI]\n")
-        f_ini_empty_regex.write("lldp_regex_block_split = \n")  # Pusty w .ini
-    # .ini: lldp_regex_block_split = (pusty)
-    # config_map default: r'\n\s*(?=Chassis id:)' (z głównej mapy w pliku)
-    # Oczekiwany: r'\n\s*(?=Chassis id:)'
-    loaded_app_config3 = get_env_config(env_file_path=".env.test_cl", config_ini_path="config.test_cl.ini")
-    original_default_lldp_split = [v[3] for k, v in load_config().items() if k == "lldp_regex_block_split"][0]
-    assert loaded_app_config3.get("lldp_regex_block_split") == original_default_lldp_split
-    logger.info(f"  Test 3 lldp_regex_block_split: OK, jest '{loaded_app_config3.get('lldp_regex_block_split')}'")
+    if os.path.exists(TEST_CREDS_JSON_FILE_MAIN): os.remove(TEST_CREDS_JSON_FILE_MAIN)
 
-    logger.info("Testy dla .env i .ini wydają się przechodzić zgodnie z logiką _get_typed_value i get_env_config.")
+    with open(TEST_ENV_MAIN, "w", encoding="utf-8") as f_env:
+        f_env.write("LIBRENMS_BASE_URL=http://test.com\n")
+        f_env.write("LIBRENMS_API_KEY=testkey\n")
+        f_env.write("CLI_USER_DEFAULT=env_user_def\n")
+        f_env.write("CLI_PASS_DEFAULT=env_pass_def\n")
 
-    if os.path.exists(".env.test_cl"): os.remove(".env.test_cl")
-    if os.path.exists("config.test_cl.ini"): os.remove("config.test_cl.ini")
+    logger.info("--- Test 2: Ładowanie poświadczeń (plik JSON nie istnieje, fallback do .env) ---")
+    config_env_fallback = get_env_config(env_file_path=TEST_ENV_MAIN, config_ini_path=TEST_CONFIG_INI_MAIN)
+    assert config_env_fallback['cli_credentials']['defaults'].get('cli_user') == "env_user_def"
+    logger.info("  Test 2: Fallback do .env dla poświadczeń zadziałał poprawnie.")
+
+    if os.path.exists(TEST_CREDS_JSON_FILE_MAIN): os.remove(TEST_CREDS_JSON_FILE_MAIN)
+    if os.path.exists(TEST_CONFIG_INI_MAIN): os.remove(TEST_CONFIG_INI_MAIN)
+    if os.path.exists(TEST_ENV_MAIN): os.remove(TEST_ENV_MAIN)
+    if os.path.exists(DEFAULT_CLI_CREDENTIALS_JSON_FILE): os.remove(DEFAULT_CLI_CREDENTIALS_JSON_FILE)
     logger.info("Testowanie config_loader.py zakończone.")
+

@@ -7,10 +7,11 @@ from typing import List, Dict, Tuple, Optional, Any, NamedTuple
 
 from librenms_client import LibreNMSAPI
 import drawio_utils
-# import drawio_layout # Nie jest już bezpośrednio potrzebny tutaj
+# import drawio_layout # Not directly needed here anymore
 
 import common_device_logic
 from common_device_logic import PortEndpointData, DeviceDisplayData
+from utils import normalize_interface_name  # Importuj normalize_interface_name
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class StyleInfo(NamedTuple):
     dummy_endpoint_style: str = "shape=ellipse;perimeter=ellipsePerimeter;fillColor=none;strokeColor=none;resizable=0;movable=0;editable=0;portConstraint=none;noLabel=1;selectable=0;deletable=0;points=[];"
 
 
-def _extract_styles_from_template(template_path: str) -> StyleInfo: # Usunięto argument config
+def _extract_styles_from_template(template_path: str) -> StyleInfo:
     if ET is None:
         logger.error("Moduł ET niedostępny w _extract_styles_from_template.")
         return StyleInfo()
@@ -70,8 +71,8 @@ def calculate_dynamic_device_size(
         config: Dict[str, Any],
         device_index_for_log: int = 0
 ) -> Tuple[float, float]:
-    if ET is None: # ET nie jest tu używane, ale zostawiam dla spójności z oryginalnym kodem
-        return (config.get('min_chassis_width'), config.get('min_chassis_height'))
+    if ET is None:
+        return (config.get('min_chassis_width', 100.0), config.get('min_chassis_height', 60.0))
 
     logger.debug(f"DrawIO: Obliczanie rozmiaru dla urządzenia (log index: {device_index_for_log})...")
     try:
@@ -83,13 +84,13 @@ def calculate_dynamic_device_size(
         return width, height
     except Exception as e:
         logger.error(f"DrawIO: Błąd obliczania rozmiaru urządzenia: {e}. Używam domyślnych.", exc_info=True)
-        return (config.get('min_chassis_width'), config.get('min_chassis_height'))
+        return (config.get('min_chassis_width', 100.0), config.get('min_chassis_height', 60.0))
 
 
 def add_device_to_diagram(
         global_root_cell: ET.Element,
         prepared_data: DeviceDisplayData,
-        api_client: LibreNMSAPI,
+        api_client: LibreNMSAPI,  # Nie jest już używane bezpośrednio tutaj, ale zachowane dla spójności interfejsu
         position: Tuple[float, float],
         device_internal_idx: int,
         styles: StyleInfo,
@@ -102,6 +103,7 @@ def add_device_to_diagram(
     port_map_for_device: Dict[Any, PortEndpointData] = {}
     offset_x, offset_y = position
     group_id_base, group_cell_id = f"dev{device_internal_idx}", f"group_dev{device_internal_idx}"
+    interface_replacements_cfg = config.get('interface_name_replacements', {})
 
     current_host_identifier = prepared_data.canonical_identifier
     logger.info(
@@ -201,11 +203,35 @@ def add_device_to_diagram(
             global_root_cell.append(dummy_vtx)
 
             ep_data = PortEndpointData(conn_dummy_id, ep_abs_x, ep_abs_y, conn_orient)
-            p_name_api = p_info.get('ifName')
+
+            # Dodawanie kluczy do mapy portów
             if p_ifidx is not None: port_map_for_device[f"ifindex_{p_ifidx}"] = ep_data
             if p_id_api is not None: port_map_for_device[f"portid_{p_id_api}"] = ep_data
-            if p_name_api: port_map_for_device[p_name_api.lower()] = ep_data
-            port_map_for_device[vis_num_str] = ep_data
+            port_map_for_device[vis_num_str] = ep_data  # Numer wizualny
+
+            # Dodaj ifName (surowy i znormalizowany)
+            p_name_api = str(p_info.get('ifName', '')).strip()
+            if p_name_api:
+                port_map_for_device[p_name_api.lower()] = ep_data
+                normalized_p_name = normalize_interface_name(p_name_api, interface_replacements_cfg)
+                if normalized_p_name.lower() != p_name_api.lower():
+                    port_map_for_device[normalized_p_name.lower()] = ep_data
+
+            # Dodaj ifAlias (surowy i znormalizowany), jeśli inny niż ifName
+            p_alias_api = str(p_info.get('ifAlias', '')).strip()
+            if p_alias_api and p_alias_api.lower() != p_name_api.lower():
+                port_map_for_device[p_alias_api.lower()] = ep_data
+                normalized_p_alias = normalize_interface_name(p_alias_api, interface_replacements_cfg)
+                if normalized_p_alias.lower() != p_alias_api.lower() and normalized_p_alias.lower() != p_name_api.lower():
+                    port_map_for_device[normalized_p_alias.lower()] = ep_data
+
+            # Dodaj ifDescr (surowy i znormalizowany), jeśli inny niż ifName i ifAlias
+            p_descr_api = str(p_info.get('ifDescr', '')).strip()
+            if p_descr_api and p_descr_api.lower() != p_name_api.lower() and p_descr_api.lower() != p_alias_api.lower():
+                port_map_for_device[p_descr_api.lower()] = ep_data
+                normalized_p_descr = normalize_interface_name(p_descr_api, interface_replacements_cfg)
+                if normalized_p_descr.lower() != p_descr_api.lower() and normalized_p_descr.lower() != p_name_api.lower() and normalized_p_descr.lower() != p_alias_api.lower():
+                    port_map_for_device[normalized_p_descr.lower()] = ep_data
 
             alias_txt = str(p_info.get("ifAlias", "")).strip()
             if alias_txt:
@@ -273,11 +299,16 @@ def add_device_to_diagram(
         global_root_cell.append(mgmt0_dummy_vtx)
 
         ep_data_m = PortEndpointData(mgmt0_conn_id, ep_abs_x_m, ep_abs_y_m, "right")
-        mgmt0_name_api = mgmt0_info.get('ifName')
+
         if mgmt0_ifidx is not None: port_map_for_device[f"ifindex_{mgmt0_ifidx}"] = ep_data_m
         if mgmt0_pid is not None: port_map_for_device[f"portid_{mgmt0_pid}"] = ep_data_m
-        if mgmt0_name_api: port_map_for_device[mgmt0_name_api.lower()] = ep_data_m
-        port_map_for_device["mgmt0"] = ep_data_m
+        port_map_for_device["mgmt0"] = ep_data_m  # Klucz specjalny
+        mgmt0_name_api = str(mgmt0_info.get('ifName', '')).strip()
+        if mgmt0_name_api:  # Dodaj także ifName dla mgmt0, jeśli istnieje
+            port_map_for_device[mgmt0_name_api.lower()] = ep_data_m
+            normalized_mgmt0_name = normalize_interface_name(mgmt0_name_api, interface_replacements_cfg)
+            if normalized_mgmt0_name.lower() != mgmt0_name_api.lower():
+                port_map_for_device[normalized_mgmt0_name.lower()] = ep_data_m
 
         alias_txt_m = str(mgmt0_info.get("ifAlias", "")).strip()
         if alias_txt_m:
@@ -301,6 +332,7 @@ def add_device_to_diagram(
                                                                     (aux_ex_m_abs, aux_ey_m_abs))
             global_root_cell.append(mgmt0_aux_edge)
 
+    # ... (reszta funkcji add_device_to_diagram, czyli tworzenie etykiety informacyjnej, pozostaje bez zmian) ...
     info_lbl_id = f"info_lbl_{group_id_base}"
     dev_info = prepared_data.device_api_info
     dev_id_val, hostname_raw, ip_raw, purpose_raw = dev_info.get('device_id', 'N/A'), \
@@ -397,8 +429,8 @@ def add_device_to_diagram(
     info_lbl_abs_x, info_lbl_abs_y = offset_x - info_label_width - info_label_margin_cfg, \
                                      offset_y + (chassis_height / 2) - (info_lbl_h / 2)
 
-    grid_margin_y_cfg = config.get('grid_margin_y')
-    info_lbl_abs_y = max((grid_margin_y_cfg / 3), info_lbl_abs_y)
+    grid_margin_y_cfg = config.get('grid_margin_y', 350.0)  # Domyślna wartość
+    info_lbl_abs_y = max((float(grid_margin_y_cfg) / 3), info_lbl_abs_y)
 
     dev_info_lbl_cell = drawio_utils.create_vertex_cell(info_lbl_id, "1", full_dev_lbl_html, info_lbl_abs_x,
                                                         info_lbl_abs_y, info_label_width, info_lbl_h, styles.info_label,
