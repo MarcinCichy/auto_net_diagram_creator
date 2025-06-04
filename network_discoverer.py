@@ -13,10 +13,12 @@ try:
     SNMP_UTILS_AVAILABLE = True
 except ImportError:
     SNMP_UTILS_AVAILABLE = False
+    # Logger już powinien być skonfigurowany przez main_app
     logging.getLogger(__name__).warning("Moduł snmp_utils.py nie znaleziony. Funkcje SNMP nie będą działać.")
 
 
-    class snmp_utils:
+    class snmp_utils:  # type: ignore [no-redef]
+        # Definicje zastępcze, aby uniknąć AttributeError, jeśli SNMP_UTILS_AVAILABLE jest False
         @staticmethod
         def snmp_get_lldp_neighbors(h: str, c: str, timeout: int = 0, retries: int = 0) -> Optional[
             List[Tuple[int, str, str]]]: return None
@@ -63,8 +65,7 @@ class NetworkDiscoverer:
         self.all_devices_from_api: List[Dict[str, Any]] = []
         # Mapa: (canonical_id_urządzenia_lower, nazwa_portu_lower_lub_alias_lower) -> ifIndex
         self.port_name_to_ifindex_map: Dict[Tuple[str, str], Any] = {}
-        self.cli_credentials: Dict[str, Any] = config.get('cli_credentials', {"defaults": {},
-                                                                              "devices": []})  # Upewnij się, że zawsze jest struktura
+        self.cli_credentials: Dict[str, Any] = config.get('cli_credentials', {"defaults": {}, "devices": []})
         logger.debug("NetworkDiscoverer zainicjalizowany.")
 
     def discover_connections(self) -> None:
@@ -90,7 +91,7 @@ class NetworkDiscoverer:
             return
         logger.info(f"Pobrano informacje o {len(self.all_devices_from_api)} urządzeniach z API.")
 
-        self._build_port_name_to_ifindex_map()  # Zbuduj mapę PRZED przetwarzaniem urządzeń
+        self._build_port_name_to_ifindex_map()
 
         logger.info("[Odkrywanie 4/5] Przetwarzanie urządzeń docelowych i odkrywanie surowych połączeń...")
         all_found_connections_raw = self._process_all_target_devices(target_ips_or_hosts)
@@ -120,17 +121,15 @@ class NetworkDiscoverer:
 
         logger.debug(f"Wyszukiwanie poświadczeń CLI dla urządzenia: {canonical_id_device or device_info.get('ip')}")
 
-        # Lista identyfikatorów do sprawdzenia dla dopasowania "exact"
         ids_to_check_exact: List[str] = []
         if device_info.get('ip'): ids_to_check_exact.append(str(device_info['ip']).lower().strip())
         if device_info.get('hostname'): ids_to_check_exact.append(str(device_info['hostname']).lower().strip())
         if device_info.get('sysName'): ids_to_check_exact.append(str(device_info['sysName']).lower().strip())
         if device_info.get('purpose'): ids_to_check_exact.append(str(device_info['purpose']).lower().strip())
         if canonical_id_device: ids_to_check_exact.append(canonical_id_device.lower().strip())
-        ids_to_check_exact = list(set(filter(None, ids_to_check_exact)))  # Usuń duplikaty i puste
+        ids_to_check_exact = list(set(filter(None, ids_to_check_exact)))
         logger.debug(f"  Identyfikatory dla 'exact' match: {ids_to_check_exact}")
 
-        # Lista identyfikatorów do sprawdzenia dla dopasowania "regex" (zazwyczaj nazwy)
         identifiers_for_regex: List[str] = list(set(filter(None, [
             str(s).strip() for s in
             [device_info.get('hostname'), device_info.get('sysName'), device_info.get('purpose'), canonical_id_device]
@@ -139,32 +138,27 @@ class NetworkDiscoverer:
         logger.debug(f"  Identyfikatory dla 'regex' match: {identifiers_for_regex}")
 
         device_creds_list = self.cli_credentials.get("devices", [])
-        # Najpierw szukaj dopasowań "exact"
         for cred_entry in device_creds_list:
-            identifier_cred = str(
-                cred_entry.get("identifier", "")).strip()  # Nie rób tu lower(), bo regex może być case-sensitive
-            match_type = cred_entry.get("match", "exact")  # Domyślnie "exact"
+            identifier_cred = str(cred_entry.get("identifier", "")).strip()
+            match_type = cred_entry.get("match", "exact")
 
             if match_type == "exact":
-                if identifier_cred.lower() in ids_to_check_exact:  # Porównanie lower() dla exact
+                if identifier_cred.lower() in ids_to_check_exact:
                     user, password = cred_entry.get("cli_user"), cred_entry.get("cli_pass")
                     if user and password:
                         logger.info(
                             f"  CLI Creds: Znaleziono dokładne dopasowanie ('{identifier_cred}') dla {canonical_id_device or device_info.get('ip')}.")
                         return user, password
 
-        # Następnie szukaj dopasowań "regex"
         for cred_entry in device_creds_list:
-            pattern_cred = cred_entry.get("identifier")  # Dla regex, bierzemy oryginalny case
+            pattern_cred = cred_entry.get("identifier")
             match_type = cred_entry.get("match")
 
             if match_type == "regex" and pattern_cred:
                 try:
-                    # Użytkownik może chcieć regex wrażliwy na wielkość liter, więc nie kompiluj z re.IGNORECASE domyślnie
-                    # chyba że wzorzec sam to specyfikuje np. (?i)
                     regex = re.compile(pattern_cred)
                     for val_to_check in identifiers_for_regex:
-                        if regex.fullmatch(str(val_to_check)):  # fullmatch, aby cały string pasował
+                        if regex.fullmatch(str(val_to_check)):
                             user, password = cred_entry.get("cli_user"), cred_entry.get("cli_pass")
                             if user and password:
                                 logger.info(
@@ -200,7 +194,7 @@ class NetworkDiscoverer:
                 continue
 
             canonical_id = get_canonical_identifier(target_device_api_info, ip_or_host_target)
-            if not canonical_id:  # Dodatkowe zabezpieczenie
+            if not canonical_id:
                 logger.warning(f"Nie można ustalić kanonicznego ID dla '{ip_or_host_target}'. Pomijam.")
                 continue
             logger.info(
@@ -270,7 +264,7 @@ class NetworkDiscoverer:
 
     def _build_port_name_to_ifindex_map(self) -> None:
         logger.info("Rozpoczynam budowanie globalnej mapy NazwaPortu->ifIndex...")
-        self.port_name_to_ifindex_map = {}  # (device_canonical_id_lower, port_name_lower) -> ifIndex
+        self.port_name_to_ifindex_map = {}
         interface_replacements = self.config.get('interface_name_replacements', {})
         total_api_devices = len(self.all_devices_from_api)
         if total_api_devices == 0:
@@ -283,7 +277,6 @@ class NetworkDiscoverer:
                     f"  Budowanie mapy NazwaPortu->ifIndex: Przetworzono {i + 1}/{total_api_devices} urządzeń API...")
 
             dev_id_api = device_api_entry.get("device_id")
-            # Użyj get_canonical_identifier, aby mieć spójny identyfikator urządzenia
             canonical_id_api_dev = get_canonical_identifier(device_api_entry)
 
             if not dev_id_api or not canonical_id_api_dev:
@@ -305,7 +298,6 @@ class NetworkDiscoverer:
                     # Klucz główny: ifName (znormalizowany)
                     if_name_raw = str(p_info.get("ifName", "")).strip()
                     if if_name_raw:
-                        # Normalizuj ifName przed dodaniem do mapy
                         normalized_if_name = normalize_interface_name(if_name_raw, interface_replacements)
                         map_key_ifname = (dev_id_lower_for_map, normalized_if_name.lower())
                         if map_key_ifname in self.port_name_to_ifindex_map and self.port_name_to_ifindex_map[
@@ -324,7 +316,7 @@ class NetworkDiscoverer:
                             if map_key_alias not in self.port_name_to_ifindex_map:
                                 self.port_name_to_ifindex_map[map_key_alias] = ifindex
                             elif self.port_name_to_ifindex_map[map_key_alias] != ifindex:
-                                logger.debug(  # Zmieniono na DEBUG, bo może być dużo takich przypadków
+                                logger.debug(
                                     f"  Mapa NazwaPortu->ifIndex: Konflikt dla klucza {alias_type_key} '{map_key_alias}' (oryginalny alias: '{alias_val_raw}'). "
                                     f"Istniejący ifIndex: {self.port_name_to_ifindex_map[map_key_alias]}, nowy ifIndex: {ifindex} "
                                     f"(dla portu ifName: '{if_name_raw}'). Nie nadpisuję aliasu/opisu, jeśli ifName już zmapował ten ifIndex lub inny alias.")
@@ -334,6 +326,48 @@ class NetworkDiscoverer:
                 logger.debug(f"  Mapa NazwaPortu->ifIndex: Pełny traceback dla {canonical_id_api_dev}:", exc_info=True)
         logger.info(
             f"✓ Zakończono budowę mapy NazwaPortu->ifIndex. Liczba wpisów: {len(self.port_name_to_ifindex_map)}.")
+
+    # Ta metoda musi być częścią klasy NetworkDiscoverer
+    def _get_ifindex_for_port(self, device_canonical_id_lower: str, port_name_raw: str) -> Optional[int]:
+        """
+        Próbuje znaleźć ifIndex dla danego portu na urządzeniu, używając globalnej mapy.
+        Najpierw próbuje po surowej nazwie, potem po znormalizowanej.
+        """
+        if not device_canonical_id_lower or not port_name_raw:
+            logger.debug(
+                f"    _get_ifindex: Puste device_canonical_id_lower ('{device_canonical_id_lower}') lub port_name_raw ('{port_name_raw}').")
+            return None
+
+        port_name_raw_lower = port_name_raw.lower()
+        map_key_raw = (device_canonical_id_lower, port_name_raw_lower)
+
+        ifindex = self.port_name_to_ifindex_map.get(map_key_raw)
+        if ifindex is not None:
+            logger.debug(
+                f"    _get_ifindex: Znaleziono ifIndex ({ifindex}) dla '{device_canonical_id_lower}':'{port_name_raw}' przez surową nazwę '{port_name_raw_lower}'.")
+            try:
+                return int(ifindex)
+            except ValueError:
+                return None
+
+        interface_replacements = self.config.get('interface_name_replacements', {})
+        normalized_port_name = normalize_interface_name(port_name_raw, interface_replacements)
+        normalized_port_name_lower = normalized_port_name.lower()
+
+        if normalized_port_name_lower != port_name_raw_lower:
+            map_key_normalized = (device_canonical_id_lower, normalized_port_name_lower)
+            ifindex = self.port_name_to_ifindex_map.get(map_key_normalized)
+            if ifindex is not None:
+                logger.debug(
+                    f"    _get_ifindex: Znaleziono ifIndex ({ifindex}) dla '{device_canonical_id_lower}':'{port_name_raw}' przez znormalizowaną nazwę '{normalized_port_name_lower}'.")
+                try:
+                    return int(ifindex)
+                except ValueError:
+                    return None
+
+        logger.debug(
+            f"    _get_ifindex: Nie znaleziono ifIndex dla '{device_canonical_id_lower}':'{port_name_raw}' (próbowano surowej: '{port_name_raw_lower}' i znormalizowanej: '{normalized_port_name_lower}').")
+        return None
 
     def _enrich_connections(self, raw_connections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         logger.info(f"Rozpoczynam wzbogacanie {len(raw_connections)} surowych połączeń...")
@@ -345,8 +379,8 @@ class NetworkDiscoverer:
 
             local_original_id_raw = conn_raw.get('local_host')
             remote_original_id_raw = conn_raw.get('neighbor_host')
-            local_if_raw = str(conn_raw.get('local_if') or "").strip()  # Upewnij się, że jest stringiem
-            remote_if_raw = str(conn_raw.get('neighbor_if') or "").strip()  # Upewnij się, że jest stringiem
+            local_if_raw = str(conn_raw.get('local_if') or "").strip()
+            remote_if_raw = str(conn_raw.get('neighbor_if') or "").strip()
 
             local_device_api_details = find_device_in_list(local_original_id_raw, self.all_devices_from_api)
             remote_device_api_details = find_device_in_list(remote_original_id_raw, self.all_devices_from_api)
@@ -358,13 +392,11 @@ class NetworkDiscoverer:
                 logger.warning(
                     f"    Pominięto (wzbogacanie): Brak kanonicznego ID dla urządzenia lokalnego. Surowe ID: '{local_original_id_raw}'. Połączenie: {conn_raw}");
                 continue
+
             if not remote_canonical_id:
-                # To może być normalne, jeśli urządzenie zdalne nie jest w LibreNMS
                 logger.debug(
                     f"    Informacja (wzbogacanie): Brak kanonicznego ID dla urządzenia zdalnego. Surowe ID: '{remote_original_id_raw}'. Połączenie: {conn_raw}");
-                # Kontynuujemy, ale remote_ifindex prawdopodobnie będzie None
 
-            # Normalizuj nazwy portów PRZED próbą znalezienia ifIndex, jeśli ifIndex nie jest już dostępny
             normalized_local_if = normalize_interface_name(local_if_raw,
                                                            interface_replacements) if local_if_raw else None
             normalized_remote_if = normalize_interface_name(remote_if_raw,
@@ -374,24 +406,29 @@ class NetworkDiscoverer:
                 f"    Normalizacja portów: Lokalny: '{local_if_raw}' -> '{normalized_local_if}', Zdalny: '{remote_if_raw}' -> '{normalized_remote_if}'")
 
             local_ifindex = conn_raw.get('local_ifindex')
-            if local_ifindex is None and local_canonical_id and normalized_local_if:
-                local_ifindex = self._get_ifindex_for_port(local_canonical_id,
-                                                           normalized_local_if)  # Użyj znormalizowanej nazwy
-                if local_ifindex is None and local_if_raw != normalized_local_if:  # Jeśli normalizacja pomogła, a surowa nie, spróbuj surowej
-                    local_ifindex = self._get_ifindex_for_port(local_canonical_id, local_if_raw)
+            if local_ifindex is None and local_canonical_id and local_if_raw:
+                logger.debug(
+                    f"    Próba znalezienia local_ifindex dla {local_canonical_id}:{local_if_raw} (znormalizowany: {normalized_local_if})")
+                local_ifindex = self._get_ifindex_for_port(local_canonical_id.lower(), local_if_raw)  # Najpierw surowa
+                if local_ifindex is None and normalized_local_if and normalized_local_if.lower() != local_if_raw.lower():
+                    local_ifindex = self._get_ifindex_for_port(local_canonical_id.lower(),
+                                                               normalized_local_if)  # Potem znormalizowana
 
             remote_ifindex = conn_raw.get('remote_ifindex')
-            if remote_ifindex is None and remote_canonical_id and normalized_remote_if:
-                remote_ifindex = self._get_ifindex_for_port(remote_canonical_id, normalized_remote_if)
-                if remote_ifindex is None and remote_if_raw != normalized_remote_if:
-                    remote_ifindex = self._get_ifindex_for_port(remote_canonical_id, remote_if_raw)
+            if remote_ifindex is None and remote_canonical_id and remote_if_raw:
+                logger.debug(
+                    f"    Próba znalezienia remote_ifindex dla {remote_canonical_id}:{remote_if_raw} (znormalizowany: {normalized_remote_if})")
+                remote_ifindex = self._get_ifindex_for_port(remote_canonical_id.lower(), remote_if_raw)
+                if remote_ifindex is None and normalized_remote_if and normalized_remote_if.lower() != remote_if_raw.lower():
+                    remote_ifindex = self._get_ifindex_for_port(remote_canonical_id.lower(), normalized_remote_if)
 
-            # Sprawdzenie self-connection po ustaleniu kanonicznych ID
             if local_canonical_id and remote_canonical_id and local_canonical_id == remote_canonical_id:
-                # Dla self-connection, sprawdź czy porty (po normalizacji) są różne
-                # lub czy ifIndexy są różne (jeśli dostępne)
-                ports_are_different = True  # Załóż, że są różne, chyba że udowodnimy inaczej
-                if normalized_local_if and normalized_remote_if and normalized_local_if.lower() == normalized_remote_if.lower():
+                ports_are_different = True
+                final_local_port_for_check = normalized_local_if or local_if_raw
+                final_remote_port_for_check = normalized_remote_if or remote_if_raw
+
+                if final_local_port_for_check and final_remote_port_for_check and \
+                        final_local_port_for_check.lower() == final_remote_port_for_check.lower():
                     ports_are_different = False
 
                 if local_ifindex is not None and remote_ifindex is not None and local_ifindex == remote_ifindex:
@@ -399,15 +436,14 @@ class NetworkDiscoverer:
 
                 if not ports_are_different:
                     logger.debug(
-                        f"    Pominięto (wzbogacanie): Self-connection na tym samym porcie ('{local_canonical_id}':'{normalized_local_if}' lub ifIndex: {local_ifindex}). Połączenie: {conn_raw}");
+                        f"    Pominięto (wzbogacanie): Self-connection na tym samym porcie ('{local_canonical_id}':'{final_local_port_for_check}' lub ifIndex: {local_ifindex}). Połączenie: {conn_raw}");
                     continue
 
             enriched_conn_data = {
                 "local_device": local_canonical_id,
                 "local_port": normalized_local_if or local_if_raw,
-                # Użyj znormalizowanej, jeśli istnieje, inaczej surowej
                 "local_ifindex": int(local_ifindex) if local_ifindex is not None else None,
-                "remote_device": remote_canonical_id,  # Może być None, jeśli urządzenie zdalne nie jest znane
+                "remote_device": remote_canonical_id,
                 "remote_port": normalized_remote_if or remote_if_raw,
                 "remote_ifindex": int(remote_ifindex) if remote_ifindex is not None else None,
                 "vlan": conn_raw.get('vlan'),
@@ -415,7 +451,6 @@ class NetworkDiscoverer:
                 "local_device_ip": local_device_api_details.get('ip') if local_device_api_details else None,
                 "remote_device_ip": remote_device_api_details.get('ip') if remote_device_api_details else None,
             }
-            # Usuń klucze z wartością None, z wyjątkiem tych, które mogą być celowo None (vlan, ifindexy)
             final_enriched_conn = {k: v for k, v in enriched_conn_data.items() if
                                    v is not None or k in ["vlan", "local_ifindex", "remote_ifindex", "remote_device",
                                                           "remote_device_ip"]}
