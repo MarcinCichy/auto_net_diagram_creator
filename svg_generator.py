@@ -6,7 +6,7 @@ import logging
 from typing import List, Dict, Tuple, Optional, Any
 
 from librenms_client import LibreNMSAPI
-from utils import get_canonical_identifier, normalize_interface_name  # Zmieniony import
+from utils import get_canonical_identifier, normalize_interface_name
 
 import common_device_logic
 from common_device_logic import PortEndpointData, DeviceDisplayData
@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 
 SVG_FILL_MAP = {"#ffffff": "white", "#dae8fc": "#dae8fc", "#E6E6E6": "#E6E6E6", "#D5E8D4": "#D5E8D4",
                 "#F8CECC": "#F8CECC", "#FFE6CC": "#FFE6CC", "#E1D5E7": "#E1D5E7", "#f8f8f8": "#f8f8f8",
-                "none": "none", }
+                "#F5F5F5": "#F5F5F5", "none": "none", }
 SVG_STROKE_MAP = {"#000000": "black", "#6c8ebf": "#6c8ebf", "#666666": "#666666", "#82B366": "#82B366",
                   "#B85450": "#B85450", "#D79B00": "#D79B00", "#9673A6": "#9673A6", "#AAAAAA": "grey",
-                  "#FF9900": "orange", "#bababa": "#bababa", "#c3c3c3": "#c3c3c3", "none": "none", }
+                  "#FF9900": "orange", "#bababa": "#bababa", "#c3c3c3": "#c3c3c3", "#4B9ACC": "#4B9ACC",
+                  "none": "none", }
 
 
 def _parse_drawio_style_string_for_svg(style_string: str, default_fill: str = "white", default_stroke: str = "black",
@@ -125,7 +126,7 @@ class SVGDiagram:
 def svg_add_device_to_diagram(
         svg_diagram: SVGDiagram,
         prepared_data: DeviceDisplayData,
-        api_client: LibreNMSAPI,  # Nie jest już używane bezpośrednio tutaj
+        api_client: LibreNMSAPI,
         position: Tuple[float, float],
         device_internal_idx: int,
         drawio_styles_ref: DrawioStyleInfoRef,
@@ -386,7 +387,6 @@ def svg_add_device_to_diagram(
 
     svg_diagram.add_element(device_group_main_svg)
 
-    # ... (reszta funkcji svg_add_device_to_diagram, czyli tworzenie etykiety informacyjnej, pozostaje bez zmian) ...
     dev_api_info_data = prepared_data.device_api_info
     dev_id_val = dev_api_info_data.get('device_id', 'N/A')
     hostname_raw = dev_api_info_data.get('hostname', '')
@@ -556,55 +556,35 @@ def svg_add_device_to_diagram(
     return port_map_for_device_svg
 
 
-def _calculate_svg_waypoint(x: float, y: float, orientation: str, offset_val: float) -> Tuple[float, float]:
-    """Pomocnicza funkcja do obliczania waypointów, wyodrębniona dla SVG."""
-    wp_x_calc, wp_y_calc = x, y
-    if orientation == "up":
-        wp_y_calc -= offset_val
-    elif orientation == "down":
-        wp_y_calc += offset_val
-    elif orientation == "left":
-        wp_x_calc -= offset_val
-    elif orientation == "right":
-        wp_x_calc += offset_val
-    return wp_x_calc, wp_y_calc
-
-
 def svg_draw_connection(svg_diagram: SVGDiagram,
-                        source_port_data: PortEndpointData, target_port_data: PortEndpointData,
-                        vlan_label: Optional[str], connection_idx: int,
-                        waypoint_offset_val: float,
+                        path_points: List[Tuple[float, float]],
+                        label_text: Optional[str],
+                        connection_idx_or_id: Any,
                         config: Dict[str, Any]):
-    if not source_port_data or not target_port_data: return
+    if not path_points or len(path_points) < 2: return
 
-    conn_stroke_color_conf = config.get('connection_stroke_color', "#FF9900")  # Domyślny pomarańczowy
+    conn_stroke_color_conf = config.get('connection_stroke_color', "#FF9900")
     conn_stroke_width = config.get('connection_stroke_width', "1.5")
-
     final_stroke_color = SVG_STROKE_MAP.get(conn_stroke_color_conf, conn_stroke_color_conf)
 
-    path_d_parts = [f"M {source_port_data.x:.2f},{source_port_data.y:.2f}"]
+    path_d_str = "M " + " L ".join([f"{p[0]:.2f},{p[1]:.2f}" for p in path_points])
 
-    wp_sx, wp_sy = _calculate_svg_waypoint(source_port_data.x, source_port_data.y, source_port_data.orientation,
-                                           waypoint_offset_val)
-    path_d_parts.append(f"L {wp_sx:.2f},{wp_sy:.2f}")
-
-    wp_tx, wp_ty = _calculate_svg_waypoint(target_port_data.x, target_port_data.y, target_port_data.orientation,
-                                           waypoint_offset_val)
-    path_d_parts.append(f"L {wp_tx:.2f},{wp_ty:.2f}")
-
-    path_d_parts.append(f"L {target_port_data.x:.2f},{target_port_data.y:.2f}")
-
-    path_attrs = {"d": " ".join(path_d_parts),
-                  "stroke": str(final_stroke_color),
-                  "stroke-width": str(conn_stroke_width),
-                  "fill": "none",
-                  "id": f"conn_svg_{connection_idx}"}
+    path_attrs = {"d": path_d_str, "stroke": str(final_stroke_color), "stroke-width": str(conn_stroke_width),
+                  "fill": "none", "id": f"conn_svg_{connection_idx_or_id}"}
     svg_diagram.add_element(ET.Element("path", path_attrs))
 
-    if vlan_label:
-        label_x = (wp_sx + wp_tx) / 2
-        label_y = (wp_sy + wp_ty) / 2
-        vlan_text_el = ET.Element("text", {"x": f"{label_x:.2f}", "y": f"{label_y:.2f}", "class": "connection-label"})
-        vlan_text_el.set("dy", "-2px")
-        vlan_text_el.text = f"VLAN {vlan_label}"
-        svg_diagram.add_element(vlan_text_el)
+    if label_text:
+        mid_idx = len(path_points) // 2
+        if mid_idx > 0:
+            p1 = path_points[mid_idx - 1]
+            p2 = path_points[mid_idx]
+            label_x = (p1[0] + p2[0]) / 2
+            label_y = (p1[1] + p2[1]) / 2
+
+            label_prefix = "VLAN " if label_text.isdigit() else ""
+
+            vlan_text_el = ET.Element("text",
+                                      {"x": f"{label_x:.2f}", "y": f"{label_y:.2f}", "class": "connection-label"})
+            vlan_text_el.set("dy", "-2px")
+            vlan_text_el.text = f"{label_prefix}{label_text}"
+            svg_diagram.add_element(vlan_text_el)
